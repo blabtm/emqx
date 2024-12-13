@@ -41,7 +41,13 @@
 -export([tr_prometheus_collectors/1]).
 
 %% internal exports for `emqx_enterprise_schema' only.
--export([ensure_unicode_path/2, convert_rotation/2, log_handler_common_confs/2]).
+-export([
+    log_file_path_converter/2,
+    fix_bad_log_path/1,
+    ensure_unicode_path/2,
+    convert_rotation/2,
+    log_handler_common_confs/2
+]).
 
 -define(DEFAULT_NODE_NAME, <<"emqx@127.0.0.1">>).
 
@@ -67,7 +73,7 @@
     emqx_psk_schema,
     emqx_limiter_schema,
     emqx_slow_subs_schema,
-    emqx_otel_schema,
+    {emqx_otel_schema, ee},
     emqx_mgmt_api_key_schema
 ]).
 
@@ -84,6 +90,7 @@
     dropped_msg_due_to_mqueue_is_full,
     external_broker_crashed,
     failed_to_retain_message,
+    handle_resource_metrics_failed,
     socket_receive_paused_by_rate_limit,
     unrecoverable_resource_error
 ]).
@@ -955,9 +962,7 @@ fields("log_file_handler") ->
                     default => <<"${EMQX_LOG_DIR}/emqx.log">>,
                     aliases => [file, to],
                     importance => ?IMPORTANCE_HIGH,
-                    converter => fun(Path, Opts) ->
-                        emqx_schema:naive_env_interpolation(ensure_unicode_path(Path, Opts))
-                    end
+                    converter => fun log_file_path_converter/2
                 }
             )},
         {"rotation_count",
@@ -1398,13 +1403,16 @@ log_handler_common_confs(Handler, Default) ->
     ].
 
 crash_dump_file_default() ->
-    case os:getenv("EMQX_LOG_DIR") of
-        false ->
-            %% testing, or running emqx app as deps
-            <<"log/erl_crash.dump">>;
-        Dir ->
-            unicode:characters_to_binary(filename:join([Dir, "erl_crash.dump"]), utf8)
-    end.
+    File = "erl_crash." ++ emqx_utils_calendar:now_time(second) ++ ".dump",
+    LogDir =
+        case os:getenv("EMQX_LOG_DIR") of
+            false ->
+                %% testing, or running emqx app as deps
+                "log";
+            Dir ->
+                Dir
+        end,
+    unicode:characters_to_binary(filename:join([LogDir, File]), utf8).
 
 %% utils
 -spec conf_get(string() | [string()], hocon:config()) -> term().
@@ -1518,6 +1526,62 @@ convert_rotation(undefined, _Opts) -> undefined;
 convert_rotation(#{} = Rotation, _Opts) -> maps:get(<<"count">>, Rotation, 10);
 convert_rotation(Count, _Opts) when is_integer(Count) -> Count;
 convert_rotation(Count, _Opts) -> throw({"bad_rotation", Count}).
+
+log_file_path_converter(Path, Opts) ->
+    Fixed = fix_bad_log_path(Path),
+    ensure_unicode_path(Fixed, Opts).
+
+%% Prior to 5.8.3, the log file paths are resolved by scehma module
+%% and the interpolated paths (absolute paths) are exported.
+%% When exported from docker but import to a non-docker environment,
+%% the absolute paths are not valid anymore.
+%% Here we try to fix non-existing log dir with default log dir.
+fix_bad_log_path(Bin) when is_binary(Bin) ->
+    try
+        List = [_ | _] = unicode:characters_to_list(Bin, utf8),
+        Fixed = fix_bad_log_path(List),
+        unicode:characters_to_binary(Fixed, utf8)
+    catch
+        _:_ ->
+            %% defer validation to ensure_unicode_path
+            Bin
+    end;
+fix_bad_log_path(Path) when is_list(Path) ->
+    Dir = filename:dirname(Path),
+    Name = filename:basename(Path),
+    maybe_subst_log_dir(Dir, Name);
+fix_bad_log_path(Path) ->
+    %% defer validation to ensure_unicode_path
+    Path.
+
+%% Substitute the log dir with environment variable EMQX_LOG_DIR
+%% when possible
+maybe_subst_log_dir("${" ++ _ = Dir, Name) ->
+    %% the original path is already using environment variable
+    filename:join([Dir, Name]);
+maybe_subst_log_dir(Dir, Name) ->
+    Env = os:getenv("EMQX_LOG_DIR"),
+    IsEnvSet = (Env =/= false andalso Env =/= ""),
+    case Env =:= Dir of
+        true ->
+            %% the path is the same as the environment variable
+            %% substitute it with the environment variable
+            filename:join(["${EMQX_LOG_DIR}", Name]);
+        false ->
+            case filelib:is_dir(Dir) of
+                true ->
+                    %% the path exists, keep it
+                    filename:join(Dir, Name);
+                false when IsEnvSet ->
+                    %% the path does not exist, but the environment variable is set
+                    %% substitute it with the environment variable
+                    filename:join(["${EMQX_LOG_DIR}", Name]);
+                false ->
+                    %% the path does not exist, and the environment variable is not set
+                    %% keep it
+                    filename:join(Dir, Name)
+            end
+    end.
 
 ensure_unicode_path(Path, Opts) ->
     emqx_schema:ensure_unicode_path(Path, Opts).

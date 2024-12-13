@@ -577,6 +577,7 @@ fields("crl_cache") ->
     ];
 fields("mqtt_tcp_listener") ->
     mqtt_listener(1883) ++
+        mqtt_parse_options() ++
         [
             {"tcp_options",
                 sc(
@@ -586,6 +587,7 @@ fields("mqtt_tcp_listener") ->
         ];
 fields("mqtt_ssl_listener") ->
     mqtt_listener(8883) ++
+        mqtt_parse_options() ++
         [
             {"tcp_options",
                 sc(
@@ -1881,6 +1883,19 @@ mqtt_listener(Bind) ->
                     }
                 )}
         ] ++ emqx_schema_hooks:injection_point('mqtt.listener').
+
+mqtt_parse_options() ->
+    [
+        {"parse_unit",
+            sc(
+                hoconsc:enum([chunk, frame]),
+                #{
+                    default => <<"chunk">>,
+                    desc => ?DESC(fields_mqtt_opts_parse_unit),
+                    importance => ?IMPORTANCE_LOW
+                }
+            )}
+    ].
 
 access_rules_converter(AccessRules) ->
     DeepRules =
@@ -3458,7 +3473,8 @@ naive_env_interpolation(Other) ->
     Other.
 
 split_path(Path) ->
-    split_path(Path, []).
+    {Name0, Tail} = split_path(Path, []),
+    {string:trim(Name0, both, "{}"), Tail}.
 
 split_path([], Acc) ->
     {lists:reverse(Acc), []};
@@ -3467,8 +3483,7 @@ split_path([Char | Rest], Acc) when Char =:= $/ orelse Char =:= $\\ ->
 split_path([Char | Rest], Acc) ->
     split_path(Rest, [Char | Acc]).
 
-resolve_env(Name0) ->
-    Name = string:trim(Name0, both, "{}"),
+resolve_env(Name) ->
     Value = os:getenv(Name),
     case Value =/= false andalso Value =/= "" of
         true ->

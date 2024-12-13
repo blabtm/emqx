@@ -121,7 +121,6 @@ defmodule EMQXUmbrella.MixProject do
       common_dep(:minirest),
       common_dep(:ecpool),
       common_dep(:replayq),
-      common_dep(:pbkdf2),
       # maybe forbid to fetch quicer
       common_dep(:emqtt),
       common_dep(:rulesql),
@@ -206,7 +205,7 @@ defmodule EMQXUmbrella.MixProject do
 
   def common_dep(:cowboy), do: {:cowboy, github: "emqx/cowboy", tag: "2.9.2", override: true}
   def common_dep(:jsone), do: {:jsone, github: "emqx/jsone", tag: "1.7.1", override: true}
-  def common_dep(:ecpool), do: {:ecpool, github: "emqx/ecpool", tag: "0.5.10", override: true}
+  def common_dep(:ecpool), do: {:ecpool, github: "emqx/ecpool", tag: "0.6.1", override: true}
   def common_dep(:replayq), do: {:replayq, github: "emqx/replayq", tag: "0.3.10", override: true}
   def common_dep(:jsx), do: {:jsx, github: "talentdeficit/jsx", tag: "v3.1.0", override: true}
   # in conflict by emqtt and hocon
@@ -233,9 +232,6 @@ defmodule EMQXUmbrella.MixProject do
 
   def common_dep(:rulesql), do: {:rulesql, github: "emqx/rulesql", tag: "0.2.1"}
 
-  def common_dep(:pbkdf2),
-    do: {:pbkdf2, github: "emqx/erlang-pbkdf2", tag: "2.0.4", override: true}
-
   def common_dep(:bcrypt),
     do: {:bcrypt, github: "emqx/erlang-bcrypt", tag: "0.6.2", override: true}
 
@@ -246,7 +242,7 @@ defmodule EMQXUmbrella.MixProject do
   def common_dep(:emqtt),
     do:
       {:emqtt,
-       github: "emqx/emqtt", tag: "1.13.0", override: true, system_env: maybe_no_quic_env()}
+       github: "emqx/emqtt", tag: "1.13.5", override: true, system_env: maybe_no_quic_env()}
 
   def common_dep(:typerefl),
     do: {:typerefl, github: "ieQu1/typerefl", tag: "0.9.1", override: true}
@@ -353,11 +349,11 @@ defmodule EMQXUmbrella.MixProject do
       :emqx_bridge_cassandra,
       :emqx_bridge_opents,
       :emqx_bridge_dynamo,
+      :emqx_bridge_es,
       :emqx_bridge_greptimedb,
       :emqx_bridge_hstreamdb,
       :emqx_bridge_influxdb,
       :emqx_bridge_iotdb,
-      :emqx_bridge_es,
       :emqx_bridge_matrix,
       :emqx_bridge_mongodb,
       :emqx_bridge_mysql,
@@ -374,6 +370,7 @@ defmodule EMQXUmbrella.MixProject do
       :emqx_bridge_clickhouse,
       :emqx_ft,
       :emqx_license,
+      :emqx_opentelemetry,
       :emqx_s3,
       :emqx_bridge_s3,
       :emqx_bridge_azure_blob_storage,
@@ -951,6 +948,12 @@ defmodule EMQXUmbrella.MixProject do
     )
 
     render_template(
+      "apps/emqx_conf/etc/base.hocon",
+      assigns,
+      Path.join(etc, "base.hocon")
+    )
+
+    render_template(
       "rel/emqx_vars",
       assigns,
       Path.join([release.path, "releases", "emqx_vars"])
@@ -1211,7 +1214,7 @@ defmodule EMQXUmbrella.MixProject do
     if enable_quicer?(),
       # in conflict with emqx and emqtt
       do: [
-        {:quicer, github: "emqx/quic", tag: "0.1.6", override: true}
+        {:quicer, github: "emqx/quic", tag: "0.1.10", override: true}
       ],
       else: []
   end
@@ -1224,17 +1227,14 @@ defmodule EMQXUmbrella.MixProject do
 
   def enable_quicer?() do
     "1" == System.get_env("BUILD_WITH_QUIC") or
-      not Enum.any?([
-        macos?(),
-        build_without_quic?()
-      ])
+      not build_without_quic?()
   end
 
   def get_emqx_flavor() do
     case System.get_env("EMQX_FLAVOR") do
       nil -> :official
       "" -> :official
-      flavor -> flavor
+      flavor -> String.to_atom(flavor)
     end
   end
 
@@ -1255,10 +1255,6 @@ defmodule EMQXUmbrella.MixProject do
   defp os_cmd(script, args) do
     {str, 0} = System.cmd("bash", [script | args])
     String.trim(str)
-  end
-
-  def macos?() do
-    {:unix, :darwin} == :os.type()
   end
 
   defp raspbian?() do

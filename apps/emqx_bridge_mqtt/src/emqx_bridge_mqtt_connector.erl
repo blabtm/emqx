@@ -175,22 +175,24 @@ on_remove_channel(
     } = OldState,
     ChannelId
 ) ->
-    ChannelState = maps:get(ChannelId, InstalledChannels),
-    case ChannelState of
-        #{
-            config_root := sources
-        } ->
-            emqx_bridge_mqtt_ingress:unsubscribe_channel(
-                PoolName, ChannelState, ChannelId, TopicToHandlerIndex
-            ),
-            ok;
-        _ ->
-            ok
-    end,
-    NewInstalledChannels = maps:remove(ChannelId, InstalledChannels),
-    %% Update state
-    NewState = OldState#{installed_channels => NewInstalledChannels},
-    {ok, NewState}.
+    case maps:find(ChannelId, InstalledChannels) of
+        error ->
+            %% maybe the channel failed to be added, just ignore it
+            {ok, OldState};
+        {ok, ChannelState} ->
+            case ChannelState of
+                #{config_root := sources} ->
+                    ok = emqx_bridge_mqtt_ingress:unsubscribe_channel(
+                        PoolName, ChannelState, ChannelId, TopicToHandlerIndex
+                    );
+                _ ->
+                    ok
+            end,
+            NewInstalledChannels = maps:remove(ChannelId, InstalledChannels),
+            %% Update state
+            NewState = OldState#{installed_channels => NewInstalledChannels},
+            {ok, NewState}
+    end.
 
 on_get_channel_status(
     _ResId,
@@ -356,12 +358,7 @@ on_get_status(_ResourceId, State) ->
     Workers = [{Pool, Worker} || {Pool, PN} <- Pools, {_Name, Worker} <- ecpool:workers(PN)],
     try emqx_utils:pmap(fun get_status/1, Workers, ?HEALTH_CHECK_TIMEOUT) of
         Statuses ->
-            case combine_status(Statuses) of
-                {Status, Msg} ->
-                    {Status, State, Msg};
-                Status ->
-                    Status
-            end
+            combine_status(Statuses)
     catch
         exit:timeout ->
             ?status_connecting

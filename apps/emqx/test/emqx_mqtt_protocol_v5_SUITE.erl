@@ -21,6 +21,7 @@
 
 -include_lib("emqx/include/emqx_mqtt.hrl").
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("emqx/include/asserts.hrl").
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
 -include_lib("common_test/include/ct.hrl").
 
@@ -47,6 +48,8 @@
 all() ->
     [
         {group, tcp},
+        {group, tcp_beam_framing},
+        {group, ws},
         {group, quic}
     ].
 
@@ -54,18 +57,32 @@ groups() ->
     TCs = emqx_common_test_helpers:all(?MODULE),
     [
         {tcp, [], TCs},
+        {tcp_beam_framing, [], TCs},
+        {ws, [], TCs},
         {quic, [], TCs}
     ].
 
 init_per_group(tcp, Config) ->
     Apps = emqx_cth_suite:start([emqx], #{work_dir => emqx_cth_suite:work_dir(Config)}),
-    [{port, 1883}, {conn_fun, connect}, {group_apps, Apps} | Config];
+    [{conn_type, tcp}, {port, 1883}, {conn_fun, connect}, {group_apps, Apps} | Config];
+init_per_group(tcp_beam_framing, Config) ->
+    Apps = emqx_cth_suite:start(
+        [{emqx, "listeners.tcp.test { enable = true, bind = 2883, parse_unit = frame }"}],
+        #{work_dir => emqx_cth_suite:work_dir(Config)}
+    ),
+    [{conn_type, tcp}, {port, 2883}, {conn_fun, connect}, {group_apps, Apps} | Config];
 init_per_group(quic, Config) ->
     Apps = emqx_cth_suite:start(
         [{emqx, "listeners.quic.test { enable = true, bind = 1884 }"}],
         #{work_dir => emqx_cth_suite:work_dir(Config)}
     ),
-    [{port, 1884}, {conn_fun, quic_connect}, {group_apps, Apps} | Config].
+    [{conn_type, quic}, {port, 1884}, {conn_fun, quic_connect}, {group_apps, Apps} | Config];
+init_per_group(ws, Config) ->
+    Apps = emqx_cth_suite:start(
+        [{emqx, "listeners.ws.test { enable = true, bind = 8888 }"}],
+        #{work_dir => emqx_cth_suite:work_dir(Config)}
+    ),
+    [{conn_type, ws}, {port, 8888}, {conn_fun, ws_connect}, {group_apps, Apps} | Config].
 
 end_per_group(_Group, Config) ->
     emqx_cth_suite:stop(?config(group_apps, Config)).
@@ -88,7 +105,17 @@ end_per_testcase(TestCase, Config) ->
 %%--------------------------------------------------------------------
 
 client_info(Key, Client) ->
-    maps:get(Key, maps:from_list(emqtt:info(Client)), undefined).
+    proplists:get_value(Key, emqtt:info(Client), undefined).
+
+connection_info(Info, ClientPid, Config) when is_list(Config) ->
+    connection_info(Info, ClientPid, ?config(conn_type, Config));
+connection_info(Info, ClientPid, tcp) ->
+    emqx_connection:info(Info, sys:get_state(ClientPid));
+connection_info(Info, ClientPid, quic) ->
+    emqx_connection:info(Info, sys:get_state(ClientPid));
+connection_info(Info, ClientPid, ws) ->
+    {_WSState, ConnState, _} = sys:get_state(ClientPid),
+    emqx_ws_connection:info(Info, ConnState).
 
 receive_messages(Count) ->
     receive_messages(Count, []).
@@ -142,6 +169,19 @@ t_basic_test(Config) ->
     {ok, _} = emqtt:publish(C, Topic, <<"qos 2">>, 2),
     {ok, _} = emqtt:publish(C, Topic, <<"qos 2">>, 2),
     ?assertEqual(3, length(receive_messages(3))),
+    ok = emqtt:disconnect(C).
+
+t_basic_large_packets(Config) ->
+    ConnFun = ?config(conn_fun, Config),
+    Topic = nth(2, ?TOPICS),
+    {ok, C} = emqtt:start_link([{proto_ver, v5} | Config]),
+    {ok, _} = emqtt:ConnFun(C),
+    {ok, _, [1]} = emqtt:subscribe(C, Topic, qos1),
+    {ok, _} = emqtt:publish(C, Topic, binary:copy(<<"PACKET">>, 20), 1),
+    {ok, _} = emqtt:publish(C, Topic, binary:copy(<<"PACKET">>, 200), 1),
+    {ok, _} = emqtt:publish(C, Topic, binary:copy(<<"PACKET">>, 2000), 1),
+    {ok, _} = emqtt:publish(C, Topic, binary:copy(<<"PACKET">>, 20000), 1),
+    ?assertEqual(4, length(receive_messages(4))),
     ok = emqtt:disconnect(C).
 
 %%--------------------------------------------------------------------
@@ -205,9 +245,9 @@ t_connect_will_message(Config) ->
     ]),
     {ok, _} = emqtt:ConnFun(Client1),
     [ClientPid] = emqx_cm:lookup_channels(client_info(clientid, Client1)),
-    Info = emqx_connection:info(sys:get_state(ClientPid)),
+    WillMsg = connection_info({channel, will_msg}, ClientPid, Config),
     %% [MQTT-3.1.2-7]
-    ?assertNotEqual(undefined, maps:find(will_msg, Info)),
+    ?assertNotEqual(undefined, WillMsg),
 
     {ok, Client2} = emqtt:start_link([{proto_ver, v5} | Config]),
     {ok, _} = emqtt:ConnFun(Client2),
@@ -323,35 +363,78 @@ t_connect_will_retain(Config) ->
     ok = emqtt:disconnect(Client4),
     clean_retained(Topic, Config).
 
-t_connect_idle_timeout(_Config) ->
+t_connect_silent_idle_timeout(init, Config) ->
     IdleTimeout = 2000,
     emqx_config:put_zone_conf(default, [mqtt, idle_timeout], IdleTimeout),
+    ok = snabbkaffe:start_trace(),
+    [{idle_timeout, IdleTimeout} | Config];
+t_connect_silent_idle_timeout('end', _Config) ->
+    snabbkaffe:stop(),
+    emqx_config:put_zone_conf(default, [mqtt, idle_timeout], 15000),
+    ok.
+
+t_connect_silent_idle_timeout(Config) ->
+    %% Connect, send nothing more.
+    %% Connection should be dropped in roughly `IdleTimeout` ms.
+    IdleTimeout = ?config(idle_timeout, Config),
     emqx_config:put_zone_conf(default, [mqtt, idle_timeout], IdleTimeout),
-    {ok, Sock} = emqtt_sock:connect({127, 0, 0, 1}, 1883, [], 60000),
-    timer:sleep(IdleTimeout),
-    ?assertMatch({error, closed}, emqtt_sock:recv(Sock, 1024)).
+    SockOpts = [binary, {active, true}, {nodelay, true}],
+    {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, 1883, SockOpts, 5000),
+    ?assertReceive({tcp_closed, Sock}, IdleTimeout * 2),
+    ?assertMatch(
+        {ok, #{reason := {shutdown, idle_timeout}}},
+        ?block_until(#{?snk_kind := terminate}, IdleTimeout)
+    ).
+
+t_connect_idle_timeout(init, Config) ->
+    IdleTimeout = 2000,
+    emqx_config:put_zone_conf(default, [mqtt, idle_timeout], IdleTimeout),
+    ok = snabbkaffe:start_trace(),
+    [{idle_timeout, IdleTimeout} | Config];
+t_connect_idle_timeout('end', _Config) ->
+    snabbkaffe:stop(),
+    emqx_config:put_zone_conf(default, [mqtt, idle_timeout], 15000),
+    ok.
+
+t_connect_idle_timeout(Config) ->
+    %% Connect, send few bytes.
+    %% Connection should be dropped in roughly `IdleTimeout` ms.
+    IdleTimeout = ?config(idle_timeout, Config),
+    ConnectPacket = emqx_frame:serialize(?CONNECT_PACKET(#mqtt_packet_connect{})),
+    emqx_config:put_zone_conf(default, [mqtt, idle_timeout], IdleTimeout),
+    SockOpts = [binary, {active, true}, {nodelay, true}],
+    {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, 1883, SockOpts, 5000),
+    ok = gen_tcp:send(Sock, binary:part(iolist_to_binary(ConnectPacket), 0, 4)),
+    ?assertReceive({tcp_closed, Sock}, IdleTimeout * 2),
+    ?assertMatch(
+        {ok, #{reason := {shutdown, idle_timeout}}},
+        ?block_until(#{?snk_kind := terminate}, IdleTimeout)
+    ).
 
 t_connect_emit_stats_timeout(init, Config) ->
     NewIdleTimeout = 1000,
-    emqx_config:put_zone_conf(default, [mqtt, idle_timeout], NewIdleTimeout),
     emqx_config:put_zone_conf(default, [mqtt, idle_timeout], NewIdleTimeout),
     ok = snabbkaffe:start_trace(),
     [{idle_timeout, NewIdleTimeout} | Config];
 t_connect_emit_stats_timeout('end', _Config) ->
     snabbkaffe:stop(),
     emqx_config:put_zone_conf(default, [mqtt, idle_timeout], 15000),
-    emqx_config:put_zone_conf(default, [mqtt, idle_timeout], 15000),
     ok.
 
 t_connect_emit_stats_timeout(Config) ->
     ConnFun = ?config(conn_fun, Config),
-    {_, IdleTimeout} = lists:keyfind(idle_timeout, 1, Config),
+    IdleTimeout = ?config(idle_timeout, Config),
     {ok, Client} = emqtt:start_link([{proto_ver, v5}, {keepalive, 60} | Config]),
     {ok, _} = emqtt:ConnFun(Client),
+    %% Poke the connection to ensure stats timer is armed.
+    pong = emqtt:ping(Client),
     [ClientPid] = emqx_cm:lookup_channels(client_info(clientid, Client)),
-    ?assert(is_reference(emqx_connection:info(stats_timer, sys:get_state(ClientPid)))),
+    ?assertMatch(
+        TRef when is_reference(TRef),
+        connection_info(stats_timer, ClientPid, Config)
+    ),
     ?block_until(#{?snk_kind := cancel_stats_timer}, IdleTimeout * 2, _BackInTime = 0),
-    ?assertEqual(undefined, emqx_connection:info(stats_timer, sys:get_state(ClientPid))),
+    ?assertEqual(undefined, connection_info(stats_timer, ClientPid, Config)),
     ok = emqtt:disconnect(Client).
 
 %% [MQTT-3.1.2-22]
@@ -491,7 +574,6 @@ t_connack_max_qos_allowed(init, Config) ->
     Config;
 t_connack_max_qos_allowed('end', _Config) ->
     emqx_config:put_zone_conf(default, [mqtt, max_qos_allowed], 2),
-    emqx_config:put_zone_conf(default, [mqtt, max_qos_allowed], 2),
     ok.
 t_connack_max_qos_allowed(Config) ->
     ConnFun = ?config(conn_fun, Config),
@@ -499,7 +581,6 @@ t_connack_max_qos_allowed(Config) ->
     Topic = nth(1, ?TOPICS),
 
     %% max_qos_allowed = 0
-    emqx_config:put_zone_conf(default, [mqtt, max_qos_allowed], 0),
     emqx_config:put_zone_conf(default, [mqtt, max_qos_allowed], 0),
 
     {ok, Client1} = emqtt:start_link([{proto_ver, v5} | Config]),
@@ -537,7 +618,6 @@ t_connack_max_qos_allowed(Config) ->
 
     %% max_qos_allowed = 1
     emqx_config:put_zone_conf(default, [mqtt, max_qos_allowed], 1),
-    emqx_config:put_zone_conf(default, [mqtt, max_qos_allowed], 1),
 
     {ok, Client3} = emqtt:start_link([{proto_ver, v5} | Config]),
     {ok, Connack3} = emqtt:ConnFun(Client3),
@@ -573,7 +653,6 @@ t_connack_max_qos_allowed(Config) ->
     waiting_client_process_exit(Client4),
 
     %% max_qos_allowed = 2
-    emqx_config:put_zone_conf(default, [mqtt, max_qos_allowed], 2),
     emqx_config:put_zone_conf(default, [mqtt, max_qos_allowed], 2),
 
     {ok, Client5} = emqtt:start_link([{proto_ver, v5} | Config]),
@@ -981,7 +1060,7 @@ t_share_subscribe_no_local(Config) ->
     %% MQTT-5.0 [MQTT-3.8.3-4] and [MQTT-4.13.1-1] (Disconnect)
     case catch emqtt:subscribe(Client, #{}, [{ShareTopic, [{nl, true}, {qos, 1}]}]) of
         {'EXIT', {Reason, _Stk}} ->
-            ?assertEqual({disconnected, ?RC_PROTOCOL_ERROR, #{}}, Reason)
+            ?assertEqual({shutdown, {disconnected, ?RC_PROTOCOL_ERROR, #{}}}, Reason)
     end,
 
     process_flag(trap_exit, false).

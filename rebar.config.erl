@@ -36,7 +36,7 @@ assert_otp() ->
     end.
 
 quicer() ->
-    {quicer, {git, "https://github.com/emqx/quic.git", {tag, "0.1.6"}}}.
+    {quicer, {git, "https://github.com/emqx/quic.git", {tag, "0.1.10"}}}.
 
 jq() ->
     {jq, {git, "https://github.com/emqx/jq", {tag, "v0.3.12"}}}.
@@ -84,6 +84,7 @@ is_community_umbrella_app("apps/emqx_bridge_cassandra") -> false;
 is_community_umbrella_app("apps/emqx_bridge_opents") -> false;
 is_community_umbrella_app("apps/emqx_bridge_clickhouse") -> false;
 is_community_umbrella_app("apps/emqx_bridge_dynamo") -> false;
+is_community_umbrella_app("apps/emqx_bridge_es") -> false;
 is_community_umbrella_app("apps/emqx_bridge_greptimedb") -> false;
 is_community_umbrella_app("apps/emqx_bridge_hstreamdb") -> false;
 is_community_umbrella_app("apps/emqx_bridge_influxdb") -> false;
@@ -104,6 +105,8 @@ is_community_umbrella_app("apps/emqx_oracle") -> false;
 is_community_umbrella_app("apps/emqx_bridge_rabbitmq") -> false;
 is_community_umbrella_app("apps/emqx_ft") -> false;
 is_community_umbrella_app("apps/emqx_s3") -> false;
+is_community_umbrella_app("apps/emqx_license") -> false;
+is_community_umbrella_app("apps/emqx_opentelemetry") -> false;
 is_community_umbrella_app("apps/emqx_bridge_s3") -> false;
 is_community_umbrella_app("apps/emqx_bridge_azure_blob_storage") -> false;
 is_community_umbrella_app("apps/emqx_bridge_couchbase") -> false;
@@ -139,23 +142,10 @@ is_community_umbrella_app(_) -> true.
 is_build_without(Name) ->
     "1" =:= os:getenv("BUILD_WITHOUT_" ++ Name).
 
-%% BUILD_WITH_QUIC
-is_build_with(Name) ->
-    "1" =:= os:getenv("BUILD_WITH_" ++ Name).
-
 is_jq_supported() ->
     not is_build_without("JQ").
 
 is_quicer_supported() ->
-    %% for ones who want to build QUIC on macos
-    %% export BUILD_WITH_QUIC=1
-    is_build_with("QUIC") orelse
-        is_quicer_supported(os:type()).
-
-is_quicer_supported({unix, darwin}) ->
-    %% no quic on macos so far
-    false;
-is_quicer_supported(_) ->
     not is_build_without("QUIC").
 
 is_rocksdb_supported() ->
@@ -208,7 +198,7 @@ plugins() ->
 test_plugins() ->
     [
         {rebar3_proper, "0.12.1"},
-        {coveralls, {git, "https://github.com/emqx/coveralls-erl", {tag, "v2.2.0-emqx-3"}}}
+        {coveralls, {git, "https://github.com/emqx/coveralls-erl", {tag, "v2.2.0-emqx-4"}}}
     ].
 
 test_deps() ->
@@ -551,7 +541,8 @@ emqx_etc_overlay_per_rel(_RelType) ->
 emqx_etc_overlay() ->
     [
         {"{{base_dir}}/lib/emqx/etc/ssl_dist.conf", "etc/ssl_dist.conf"},
-        {"{{base_dir}}/lib/emqx_conf/etc/emqx.conf.all", "etc/emqx.conf"}
+        {"{{base_dir}}/lib/emqx_conf/etc/emqx.conf.all", "etc/emqx.conf"},
+        {"{{base_dir}}/lib/emqx_conf/etc/base.hocon", "etc/base.hocon"}
     ].
 
 get_vsn(Profile) ->

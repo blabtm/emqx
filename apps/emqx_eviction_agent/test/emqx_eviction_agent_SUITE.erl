@@ -227,7 +227,7 @@ t_explicit_session_takeover(Config) ->
         begin
             ok = rpc:call(Node1, emqx_eviction_agent, evict_connections, [1]),
             receive
-                {'EXIT', C0, {disconnected, ?RC_USE_ANOTHER_SERVER, _}} -> ok
+                {'EXIT', C0, {shutdown, {disconnected, ?RC_USE_ANOTHER_SERVER, _}}} -> ok
             after 1000 ->
                 ?assert(false, "Connection not evicted")
             end
@@ -305,6 +305,28 @@ t_explicit_session_takeover(Config) ->
         ]
     ),
     ok = emqtt:disconnect(C3).
+
+t_evict_lost_session(_Config) ->
+    _ = erlang:process_flag(trap_exit, true),
+    ok = restart_emqx(),
+
+    %% Make a session
+    {ok, C0} = emqtt_connect([
+        {clientid, <<"client_with_session">>},
+        {clean_start, false}
+    ]),
+    {ok, _, _} = emqtt:subscribe(C0, <<"t1">>),
+    ok = emqtt:disconnect(C0),
+    ok = emqx_eviction_agent:enable(test_eviction, undefined),
+    ?assertEqual(1, emqx_eviction_agent:session_count()),
+
+    %% Emulate lost session
+    [ChanPid] = emqx_cm:lookup_channels(<<"client_with_session">>),
+    emqx_cm_registry:unregister_channel({<<"client_with_session">>, ChanPid}),
+    %% unregister is async, wait for it
+    ct:sleep(100),
+    ok = emqx_eviction_agent:evict_sessions(1, node()),
+    ?retry(_Sleep = 10, _Retries = 20, ?assertEqual(0, emqx_eviction_agent:session_count())).
 
 t_disable_on_restart(_Config) ->
     ok = emqx_eviction_agent:enable(test_eviction, undefined),

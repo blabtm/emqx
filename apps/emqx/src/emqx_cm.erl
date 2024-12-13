@@ -22,8 +22,9 @@
 -include("emqx_cm.hrl").
 -include("logger.hrl").
 -include("types.hrl").
+-include("emqx_mqtt.hrl").
+-include("emqx_external_trace.hrl").
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
--include_lib("stdlib/include/qlc.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
 -export([start_link/0]).
@@ -73,8 +74,8 @@
 
 %% Client management
 -export([
-    all_channels_table/1,
-    live_connection_table/1
+    all_channels_stream/1,
+    live_connection_stream/1
 ]).
 
 %% gen_server callbacks
@@ -137,6 +138,8 @@
 
 %% Batch drain
 -define(BATCH_SIZE, 100000).
+
+-define(CHAN_INFO_SELECT_LIMIT, 100).
 
 %% Server name
 -define(CM, ?MODULE).
@@ -457,6 +460,14 @@ discard_session(ClientId) when is_binary(ClientId) ->
 when
     Action :: kick | discard | {takeover, 'begin'} | {takeover, 'end'} | takeover_kick.
 request_stepdown(Action, ConnMod, Pid) ->
+    ?EXT_TRACE_WITH_PROCESS_FUN(
+        broker_disconnect,
+        [],
+        maps:merge(basic_trace_attrs(Pid), action_to_reason(Action)),
+        fun([]) -> do_request_stepdown(Action, ConnMod, Pid) end
+    ).
+
+do_request_stepdown(Action, ConnMod, Pid) ->
     Timeout =
         case Action == kick orelse Action == discard of
             true -> ?T_KICK;
@@ -640,30 +651,57 @@ all_channels() ->
     ets:select(?CHAN_TAB, Pat).
 
 %% @doc Get clientinfo for all clients
-all_channels_table(ConnModuleList) ->
+-spec all_channels_stream([module()]) ->
+    emqx_utils_stream:stream({
+        emqx_types:clientid(),
+        _ConnState :: atom(),
+        emqx_types:conninfo(),
+        emqx_types:clientinfo()
+    }).
+all_channels_stream(ConnModuleList) ->
     Ms = ets:fun2ms(
         fun({{ClientId, _ChanPid}, Info, _Stats}) ->
             {ClientId, Info}
         end
     ),
-    Table = ets:table(?CHAN_INFO_TAB, [{traverse, {select, Ms}}]),
     ConnModules = sets:from_list(ConnModuleList, [{version, 2}]),
-    qlc:q([
-        {ClientId, ConnState, ConnInfo, ClientInfo}
-     || {ClientId, #{
-            conn_state := ConnState,
-            clientinfo := ClientInfo,
-            conninfo := #{conn_mod := ConnModule} = ConnInfo
-        }} <-
-            Table,
-        sets:is_element(ConnModule, ConnModules)
-    ]).
+    AllChanInfoStream = emqx_utils_stream:ets(fun
+        (undefined) -> ets:select(?CHAN_INFO_TAB, Ms, ?CHAN_INFO_SELECT_LIMIT);
+        (Cont) -> ets:select(Cont)
+    end),
+    WithModulesFilteredStream = emqx_utils_stream:filter(
+        fun({_, #{conninfo := #{conn_mod := ConnModule}}}) ->
+            sets:is_element(ConnModule, ConnModules)
+        end,
+        AllChanInfoStream
+    ),
+    %% Map to the plain tuples
+    emqx_utils_stream:map(
+        fun(
+            {ClientId, #{
+                conn_state := ConnState,
+                clientinfo := ClientInfo,
+                conninfo := ConnInfo
+            }}
+        ) ->
+            {ClientId, ConnState, ConnInfo, ClientInfo}
+        end,
+        WithModulesFilteredStream
+    ).
 
 %% @doc Get all local connection query handle
-live_connection_table(ConnModules) ->
+-spec live_connection_stream([module()]) ->
+    emqx_utils_stream:stream({emqx_types:clientid(), pid()}).
+live_connection_stream(ConnModules) ->
     Ms = lists:map(fun live_connection_ms/1, ConnModules),
-    Table = ets:table(?CHAN_CONN_TAB, [{traverse, {select, Ms}}]),
-    qlc:q([{ClientId, ChanPid} || {ClientId, ChanPid} <- Table, is_channel_connected(ChanPid)]).
+    AllConnStream = emqx_utils_stream:ets(fun
+        (undefined) -> ets:select(?CHAN_CONN_TAB, Ms, ?CHAN_INFO_SELECT_LIMIT);
+        (Cont) -> ets:select(Cont)
+    end),
+    emqx_utils_stream:filter(
+        fun({_ClientId, ChanPid}) -> is_channel_connected(ChanPid) end,
+        AllConnStream
+    ).
 
 live_connection_ms(ConnModule) ->
     {{{'$1', '$2'}, ConnModule}, [], [{{'$1', '$2'}}]}.
@@ -695,7 +733,11 @@ lookup_channels(global, ClientId) ->
 lookup_channels(local, ClientId) ->
     [ChanPid || {_, ChanPid} <- ets:lookup(?CHAN_TAB, ClientId)].
 
--spec lookup_client({clientid, emqx_types:clientid()} | {username, emqx_types:username()}) ->
+-spec lookup_client(
+    {clientid, emqx_types:clientid()}
+    | {username, emqx_types:username()}
+    | {chan_pid, chan_pid()}
+) ->
     [channel_info()].
 lookup_client({username, Username}) ->
     MatchSpec = [
@@ -707,7 +749,10 @@ lookup_client({clientid, ClientId}) ->
         Rec
      || Key <- ets:lookup(?CHAN_TAB, ClientId),
         Rec <- ets:lookup(?CHAN_INFO_TAB, Key)
-    ].
+    ];
+lookup_client({chan_pid, ChanPid}) ->
+    MatchSpec = [{{{'_', '$1'}, '_', '_'}, [{'=:=', '$1', ChanPid}], ['$_']}],
+    ets:select(?CHAN_INFO_TAB, MatchSpec).
 
 %% @private
 wrap_rpc(Result) ->
@@ -837,3 +882,56 @@ kick_session_chans(ClientId, ChanPids) ->
             ok
     end,
     lists:foreach(fun(Pid) -> kick_session(ClientId, Pid) end, ChanPids).
+
+-if(?EMQX_RELEASE_EDITION == ee).
+
+basic_trace_attrs(Pid) ->
+    %% io:format("lookup_client({chan_pid, Pid}): ~p", [lookup_client({chan_pid, Pid})]),
+    case lookup_client({chan_pid, Pid}) of
+        [] ->
+            #{'channel.pid' => iolist_to_binary(io_lib:format("~p", [Pid]))};
+        [{_Chan, #{clientinfo := ClientInfo, conninfo := ConnInfo}, _Stats}] ->
+            #{
+                'client.clientid' => maps:get(clientid, ClientInfo, undefined),
+                'client.username' => maps:get(username, ClientInfo, undefined),
+                'client.proto_name' => maps:get(proto_name, ConnInfo, undefined),
+                'client.proto_ver' => maps:get(proto_ver, ConnInfo, undefined),
+                'client.is_bridge' => maps:get(is_bridge, ClientInfo, undefined),
+                'client.sockname' => ntoa(maps:get(sockname, ConnInfo, undefined)),
+                'client.peername' => ntoa(maps:get(peername, ConnInfo, undefined))
+            };
+        _ ->
+            #{}
+    end.
+
+action_to_reason(Action) when
+    Action =:= kick orelse
+        Action =:= takeover_kick
+->
+    #{
+        'client.disconnect.reason_code' => ?RC_ADMINISTRATIVE_ACTION,
+        'client.disconnect.reason' => kick
+    };
+action_to_reason(discard) ->
+    #{
+        'client.disconnect.reason_code' => ?RC_SESSION_TAKEN_OVER,
+        'client.disconnect.reason' => discard
+    };
+action_to_reason({takeover, 'begin'}) ->
+    #{
+        'client.disconnect.reason_code' => ?RC_SESSION_TAKEN_OVER,
+        'client.disconnect.reason' => takeover_begin
+    };
+action_to_reason({takeover, 'end'}) ->
+    #{
+        'client.disconnect.reason_code' => ?RC_SESSION_TAKEN_OVER,
+        'disconnect.reason' => takeover_end
+    }.
+
+ntoa(undefined) ->
+    undefined;
+ntoa(IpPort) ->
+    emqx_utils:ntoa(IpPort).
+
+-else.
+-endif.

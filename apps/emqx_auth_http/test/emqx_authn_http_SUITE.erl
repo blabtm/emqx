@@ -34,6 +34,7 @@
     username => <<"plain">>,
     password => <<"plain">>,
     peerhost => {127, 0, 0, 1},
+    peerport => 12345,
     listener => 'tcp:default',
     protocol => mqtt,
     cert_subject => <<"cert_subject_data">>,
@@ -584,7 +585,7 @@ t_auth_expire(_Config) ->
             {ok, _} = emqtt:connect(C),
             receive
                 {'DOWN', _Ref, process, C, Reason} ->
-                    ?assertMatch({disconnected, ?RC_NOT_AUTHORIZED, _}, Reason)
+                    ?assertMatch({shutdown, {disconnected, ?RC_NOT_AUTHORIZED, _}}, Reason)
             after round(ExpireMSec * 1.5) ->
                 error(timeout)
             end
@@ -853,6 +854,7 @@ samples() ->
                     <<"password">> := <<"plain">>,
                     <<"clientid">> := <<"clienta">>,
                     <<"peerhost">> := <<"127.0.0.1">>,
+                    <<"peerport">> := <<"12345">>,
                     <<"cert_subject">> := <<"cert_subject_data">>,
                     <<"cert_common_name">> := <<"cert_common_name_data">>,
                     <<"cert_pem">> := CertPem,
@@ -875,6 +877,7 @@ samples() ->
                     <<"username">> => ?PH_USERNAME,
                     <<"password">> => ?PH_PASSWORD,
                     <<"peerhost">> => ?PH_PEERHOST,
+                    <<"peerport">> => ?PH_PEERPORT,
                     <<"cert_subject">> => ?PH_CERT_SUBJECT,
                     <<"cert_common_name">> => ?PH_CERT_CN_NAME,
                     <<"cert_pem">> => ?PH_CERT_PEM,

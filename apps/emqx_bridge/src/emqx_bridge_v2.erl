@@ -280,9 +280,13 @@ lookup(ConfRootName, Type, Name) ->
             ChannelStatus = maps:get(BridgeV2Id, Channels, undefined),
             {DisplayBridgeV2Status, ErrorMsg} =
                 case {ChannelStatus, ConnectorStatus} of
+                    {_, ?status_disconnected} ->
+                        {?status_disconnected, <<"Resource not operational">>};
                     {#{status := ?status_connected}, _} ->
                         {?status_connected, <<"">>};
                     {#{error := resource_not_operational}, ?status_connecting} ->
+                        {?status_connecting, <<"Not installed">>};
+                    {#{error := not_added_yet}, _} ->
                         {?status_connecting, <<"Not installed">>};
                     {#{status := Status, error := undefined}, _} ->
                         {Status, <<"Unknown reason">>};
@@ -524,7 +528,6 @@ uninstall_bridge_v2(
     BridgeV2Id = id_with_root_name(ConfRootKey, BridgeV2Type, BridgeName, ConnectorName),
     CreationOpts = emqx_resource:fetch_creation_opts(Config),
     ok = emqx_resource_buffer_worker_sup:stop_workers(BridgeV2Id, CreationOpts),
-    ok = emqx_resource:clear_metrics(BridgeV2Id),
     case referenced_connectors_exist(BridgeV2Type, ConnectorName, BridgeName) of
         {error, _} ->
             ok;
@@ -533,7 +536,14 @@ uninstall_bridge_v2(
             ConnectorId = emqx_connector_resource:resource_id(
                 connector_type(BridgeV2Type), ConnectorName
             ),
-            emqx_resource_manager:remove_channel(ConnectorId, BridgeV2Id)
+            Res = emqx_resource_manager:remove_channel(ConnectorId, BridgeV2Id),
+            case Res of
+                ok ->
+                    ok = emqx_resource:clear_metrics(BridgeV2Id);
+                _ ->
+                    ok
+            end,
+            Res
     end.
 
 combine_connector_and_bridge_v2_config(
@@ -1182,6 +1192,9 @@ post_config_update([ConfRootKey, BridgeType, BridgeName], _Req, NewConf, OldConf
         {error, timeout} ->
             ErrorContext = #{
                 error => uninstall_timeout,
+                bridge_kind => ConfRootKey,
+                type => BridgeType,
+                name => BridgeName,
                 reason => <<
                     "Timed out trying to remove action or source.  Please try again and,"
                     " if the error persists, try disabling the connector before retrying."
