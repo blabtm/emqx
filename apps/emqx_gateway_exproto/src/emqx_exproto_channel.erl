@@ -437,7 +437,8 @@ handle_call(
             {reply, {error, ?RESP_PERMISSION_DENY, <<"Authorization deny">>}, Channel};
         _ ->
             Msg = emqx_message:make(From, Qos, Topic, Payload),
-            NMsg = emqx_mountpoint:mount(Mountpoint, Msg),
+            RMsg = emqx_message:set_flag(retain, Msg),
+            NMsg = emqx_mountpoint:mount(Mountpoint, RMsg),
             _ = emqx:publish(NMsg),
             {reply, ok, Channel}
     end;
