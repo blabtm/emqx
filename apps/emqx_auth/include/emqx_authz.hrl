@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -79,6 +79,8 @@
         }
     ]
 }).
+-define(USERNAME_RULES_EXAMPLE(EXTRA), (begin ?USERNAME_RULES_EXAMPLE end) EXTRA).
+
 -define(CLIENTID_RULES_EXAMPLE, #{
     clientid => client1,
     rules => [
@@ -113,6 +115,8 @@
         }
     ]
 }).
+-define(CLIENTID_RULES_EXAMPLE(EXTRA), (begin ?CLIENTID_RULES_EXAMPLE end) EXTRA).
+
 -define(ALL_RULES_EXAMPLE, #{
     rules => [
         #{
@@ -179,3 +183,5 @@
     ?VAR_ZONE,
     ?VAR_NS_CLIENT_ATTRS
 ]).
+
+-define(AUTHZ_CACHE, emqx_authz_cache).

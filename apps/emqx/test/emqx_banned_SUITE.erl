@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2018-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2018-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -323,8 +323,8 @@ receive_messages(Count, Msgs) ->
     end.
 
 mk_bootstrap_file(File) ->
-    Dir = code:lib_dir(emqx, test),
-    filename:join([Dir, <<"data/banned">>, File]).
+    Dir = code:lib_dir(emqx),
+    filename:join([Dir, "test", "data", "banned", File]).
 
 get_banned_list() ->
     Tabs = emqx_banned:tables(),

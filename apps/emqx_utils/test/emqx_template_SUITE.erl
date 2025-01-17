@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -134,6 +134,10 @@ t_placeholders(_) ->
     ?assertEqual(
         ["a", "b", "c", "d.d1"],
         emqx_template:placeholders(Template)
+    ),
+    ?assertEqual(
+        {["a", "b", "d.d1"], ["c"]},
+        emqx_template:placeholders(["a", "b", "d.d1", "e"], Template)
     ).
 
 t_unparse(_) ->

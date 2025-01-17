@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -57,7 +57,9 @@
     emqx_persistent_session_proto_v1,
     emqx_ds_proto_v1,
     emqx_ds_proto_v2,
-    emqx_ds_proto_v3
+    emqx_ds_proto_v3,
+    emqx_ds_shared_sub_proto_v1,
+    emqx_ds_shared_sub_proto_v2
 ]).
 -define(FORCE_DELETED_APIS, [
     {emqx_statsd, 1},
@@ -66,7 +68,9 @@
     {emqx_ds, 1},
     {emqx_ds, 2},
     {emqx_ds, 3},
-    {emqx_node_rebalance_purge, 1}
+    {emqx_node_rebalance_purge, 1},
+    {emqx_ds_shared_sub, 1},
+    {emqx_ds_shared_sub, 2}
 ]).
 %% List of known RPC backend modules:
 -define(RPC_MODULES, "gen_rpc, erpc, rpc, emqx_rpc").

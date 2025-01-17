@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_s3_test_helpers).
@@ -162,8 +162,8 @@ toxproxy_name(tcp) -> "minio_tcp";
 toxproxy_name(tls) -> "minio_tls".
 
 cert_path(FileName) ->
-    Dir = code:lib_dir(emqx_s3, test),
-    filename:join([Dir, <<"certs">>, FileName]).
+    Dir = code:lib_dir(emqx_s3),
+    filename:join([Dir, <<"test">>, <<"certs">>, FileName]).
 
 bin(String) when is_list(String) -> list_to_binary(String);
 bin(Binary) when is_binary(Binary) -> Binary.

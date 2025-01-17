@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2018-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2018-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@
             logger:log(
                 Level,
                 (Data),
-                maps:merge(Meta, #{
+                ?MAPPEND(Meta, #{
                     mfa => {?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY},
                     line => ?LINE
                 })
@@ -75,12 +75,18 @@
 %% Internal macro
 -define(_DO_TRACE(Tag, Msg, Meta),
     case persistent_term:get(?TRACE_FILTER, []) of
-        [] -> ok;
+        [] ->
+            ok;
         %% We can't bind filter list to a variable because we pollute the calling scope with it.
         %% We also don't want to wrap the macro body in a fun
         %% because this adds overhead to the happy path.
         %% So evaluate `persistent_term:get` twice.
-        _ -> emqx_trace:log(persistent_term:get(?TRACE_FILTER, []), Msg, (Meta)#{trace_tag => Tag})
+        _ ->
+            emqx_trace:log(
+                persistent_term:get(?TRACE_FILTER, []),
+                Msg,
+                ?MAPPEND(Meta, #{trace_tag => Tag})
+            )
     end
 ).
 
@@ -91,7 +97,7 @@
     ?_DO_TRACE(Tag, Msg, Meta),
     ?SLOG(
         Level,
-        (Meta)#{msg => Msg, tag => Tag},
+        ?MAPPEND(Meta, #{msg => Msg, tag => Tag}),
         #{is_trace => false}
     )
 end).
@@ -128,5 +134,15 @@ end).
 %% print to 'user' group leader
 -define(ULOG(Fmt, Args), io:format(user, Fmt, Args)).
 -define(ELOG(Fmt, Args), io:format(standard_error, Fmt, Args)).
+
+%% macro utilities
+
+%% Append literal associations to a (meta) map, avoiding compliler warnings.
+-define(MAPPEND(META, EXTRA),
+    (begin
+        META
+    end)
+        EXTRA
+).
 
 -endif.

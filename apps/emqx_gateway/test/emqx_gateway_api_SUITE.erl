@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -376,8 +376,8 @@ t_authn_data_mgmt(_) ->
         ["gateways", "stomp", "authentication", "import_users"]
     ),
 
-    Dir = code:lib_dir(emqx_auth, test),
-    JSONFileName = filename:join([Dir, <<"data/user-credentials.json">>]),
+    Dir = code:lib_dir(emqx_auth),
+    JSONFileName = filename:join([Dir, <<"test/data/user-credentials.json">>]),
     {ok, JSONData} = file:read_file(JSONFileName),
     {ok, 200, ImportedResults} = emqx_dashboard_api_test_helpers:multipart_formdata_request(
         ImportUri, [], [
@@ -389,7 +389,7 @@ t_authn_data_mgmt(_) ->
         emqx_utils_json:decode(ImportedResults, [return_maps])
     ),
 
-    CSVFileName = filename:join([Dir, <<"data/user-credentials.csv">>]),
+    CSVFileName = filename:join([Dir, <<"test/data/user-credentials.csv">>]),
     {ok, CSVData} = file:read_file(CSVFileName),
     {ok, 200, ImportedResults2} = emqx_dashboard_api_test_helpers:multipart_formdata_request(
         ImportUri, [], [
@@ -593,8 +593,8 @@ t_listeners_authn_data_mgmt(_) ->
         ["gateways", "stomp", "listeners", "stomp:tcp:def", "authentication", "import_users"]
     ),
 
-    Dir = code:lib_dir(emqx_auth, test),
-    JSONFileName = filename:join([Dir, <<"data/user-credentials.json">>]),
+    Dir = code:lib_dir(emqx_auth),
+    JSONFileName = filename:join([Dir, <<"test/data/user-credentials.json">>]),
     {ok, JSONData} = file:read_file(JSONFileName),
     {ok, 200, ImportedResults} = emqx_dashboard_api_test_helpers:multipart_formdata_request(
         ImportUri, [], [
@@ -606,7 +606,7 @@ t_listeners_authn_data_mgmt(_) ->
         emqx_utils_json:decode(ImportedResults, [return_maps])
     ),
 
-    CSVFileName = filename:join([Dir, <<"data/user-credentials.csv">>]),
+    CSVFileName = filename:join([Dir, <<"test/data/user-credentials.csv">>]),
     {ok, CSVData} = file:read_file(CSVFileName),
     {ok, 200, ImportedResults2} = emqx_dashboard_api_test_helpers:multipart_formdata_request(
         ImportUri, [], [
@@ -703,6 +703,15 @@ t_authn_fuzzy_search(_) ->
 
     {204, _} = request(delete, "/gateways/stomp/authentication"),
     {204, _} = request(get, "/gateways/stomp/authentication"),
+    ok.
+
+t_cluster_status_if_gateway_sup_is_not_running(_) ->
+    application:stop(emqx_gateway),
+    ?assertEqual(
+        [#{node => node(), status => unloaded}],
+        emqx_gateway_http:cluster_gateway_status(<<"stomp">>)
+    ),
+    application:start(emqx_gateway),
     ok.
 
 %%--------------------------------------------------------------------

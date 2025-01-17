@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -149,6 +149,17 @@ t_export_bad_table_sets(Config) ->
     Body = #{<<"table_sets">> => [<<"foo">>, <<"bar">>, <<"foo">>]},
     ?assertMatch(
         {400, #{<<"message">> := <<"Invalid table sets: bar, foo">>}},
+        export_backup2(?NODE1_PORT, Auth, Body)
+    ),
+    ok.
+
+%% Checks returned error when one or more invalid root config keys are given to the export
+%% request.
+t_export_bad_root_keys(Config) ->
+    Auth = ?config(auth, Config),
+    Body = #{<<"root_keys">> => [<<"foo">>, <<"bar">>, <<"foo">>]},
+    ?assertMatch(
+        {400, #{<<"message">> := <<"Invalid root keys: bar, foo">>}},
         export_backup2(?NODE1_PORT, Auth, Body)
     ),
     ok.
@@ -414,7 +425,8 @@ test_case_specific_apps_spec(TC) when
 test_case_specific_apps_spec(t_export_cloud) ->
     [
         emqx_auth,
-        emqx_auth_mnesia
+        emqx_auth_mnesia,
+        emqx_schema_registry
     ];
 test_case_specific_apps_spec(_TC) ->
     [].

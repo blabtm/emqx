@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -100,6 +100,16 @@ fields("retainer") ->
                     default => <<"1000/s">>,
                     example => <<"1000/s">>,
                     aliases => [deliver_rate]
+                }
+            )},
+        {max_publish_rate,
+            ?HOCON(
+                emqx_limiter_schema:rate_type(),
+                #{
+                    required => false,
+                    desc => ?DESC(max_publish_rate),
+                    default => <<"1000/s">>,
+                    example => <<"1000/s">>
                 }
             )},
         {backend, backend_config()},
@@ -232,27 +242,31 @@ check_duplicate(List) ->
         true -> ok
     end.
 
-retainer_converter(#{<<"delivery_rate">> := <<"infinity">>} = Conf, _Opts) ->
-    Conf#{
-        <<"flow_control">> => #{
-            <<"batch_read_number">> => 0,
-            <<"batch_deliver_number">> => 0
-        }
-    };
-retainer_converter(#{<<"delivery_rate">> := RateStr} = Conf, _Opts) ->
+retainer_converter(#{<<"deliver_rate">> := Delivery} = Conf, Opts) ->
+    Conf1 = maps:remove(<<"deliver_rate">>, Conf),
+    retainer_converter(Conf1#{<<"delivery_rate">> => Delivery}, Opts);
+retainer_converter(Conf, Opts) ->
+    convert_delivery_rate(Conf, Opts).
+
+convert_delivery_rate(#{<<"delivery_rate">> := <<"infinity">>} = Conf, _Opts) ->
+    FlowControl0 = maps:get(<<"flow_control">>, Conf, #{}),
+    FlowControl1 = FlowControl0#{
+        <<"batch_read_number">> => 0,
+        <<"batch_deliver_number">> => 0
+    },
+    Conf#{<<"flow_control">> => FlowControl1};
+convert_delivery_rate(#{<<"delivery_rate">> := RateStr} = Conf, _Opts) ->
     {ok, RateNum} = emqx_limiter_schema:to_rate(RateStr),
     RawRate = erlang:floor(RateNum * 1000 / emqx_limiter_schema:default_period()),
-    Control = #{
+    FlowControl0 = maps:get(<<"flow_control">>, Conf, #{}),
+    FlowControl1 = FlowControl0#{
         <<"batch_read_number">> => RawRate,
         <<"batch_deliver_number">> => RawRate,
         %% Set the maximum delivery rate per session
         <<"batch_deliver_limiter">> => #{<<"client">> => #{<<"rate">> => RateStr}}
     },
-    Conf#{<<"flow_control">> => Control};
-retainer_converter(#{<<"deliver_rate">> := Delivery} = Conf, Opts) ->
-    Conf1 = maps:remove(<<"deliver_rate">>, Conf),
-    retainer_converter(Conf1#{<<"delivery_rate">> => Delivery}, Opts);
-retainer_converter(Conf, _Opts) ->
+    Conf#{<<"flow_control">> => FlowControl1};
+convert_delivery_rate(Conf, _Opts) ->
     Conf.
 
 validate_backends_enabled(Config) ->

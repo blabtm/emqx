@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -34,7 +34,8 @@
     cleanup_resources/0,
     make_resource_id/1,
     without_password/1,
-    to_bool/1
+    to_bool/1,
+    cached_simple_sync_query/3
 ]).
 
 -define(DEFAULT_RESOURCE_OPTS, #{
@@ -179,6 +180,9 @@ to_bool(MaybeBinInt) when is_binary(MaybeBinInt) ->
 %% fallback to default
 to_bool(_) ->
     false.
+
+cached_simple_sync_query(CacheKey, ResourceID, Query) ->
+    emqx_auth_utils:cached_simple_sync_query(?AUTHN_CACHE, CacheKey, ResourceID, Query).
 
 %%--------------------------------------------------------------------
 %% Internal functions

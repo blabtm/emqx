@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -280,6 +280,18 @@ assign_clientid_to_conninfo(
     NConnInfo = maps:put(clientid, ClientId, ConnInfo),
     {ok, Packet, Channel#channel{conninfo = NConnInfo}}.
 
+assign_keepalive_to_conninfo(
+    Packet,
+    Channel = #channel{
+        conninfo = ConnInfo,
+        clientinfo = ClientInfo
+    }
+) ->
+    {Cx, _Cy} = maps:get(heartbeat, ClientInfo),
+    Keepalive = floor(Cx / 1000),
+    NConnInfo = maps:put(keepalive, Keepalive, ConnInfo),
+    {ok, Packet, Channel#channel{conninfo = NConnInfo}}.
+
 feedvar(Override, Packet, ConnInfo, ClientInfo) ->
     Envs = #{
         'ConnInfo' => ConnInfo,
@@ -435,6 +447,7 @@ handle_in(Packet = ?PACKET(?CMD_CONNECT), Channel) ->
                 fun negotiate_version/2,
                 fun enrich_clientinfo/2,
                 fun assign_clientid_to_conninfo/2,
+                fun assign_keepalive_to_conninfo/2,
                 fun run_conn_hooks/2,
                 fun set_log_meta/2,
                 %% TODO: How to implement the banned in the gateway instance?

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -36,19 +36,6 @@
 
 -define(BAD_REQUEST, 'BAD_REQUEST').
 -define(NOT_FOUND, 'NOT_FOUND').
-
--define(node_field(IsRequired), ?node_field(IsRequired, #{})).
--define(node_field(IsRequired, Meta),
-    {node, ?HOCON(binary(), Meta#{desc => "Node name", required => IsRequired})}
-).
--define(filename_field(IsRequired), ?filename_field(IsRequired, #{})).
--define(filename_field(IsRequired, Meta),
-    {filename,
-        ?HOCON(binary(), Meta#{
-            desc => "Data backup file name",
-            required => IsRequired
-        })}
-).
 
 namespace() -> undefined.
 
@@ -144,8 +131,8 @@ schema("/data/files/:filename") ->
             tags => ?TAGS,
             desc => <<"Download a data backup file">>,
             parameters => [
-                ?filename_field(true, #{in => path}),
-                ?node_field(false, #{in => query})
+                field_filename(true, #{in => path}),
+                field_node(false, #{in => query})
             ],
             responses => #{
                 200 => ?HOCON(binary),
@@ -161,8 +148,8 @@ schema("/data/files/:filename") ->
             tags => ?TAGS,
             desc => <<"Delete a data backup file">>,
             parameters => [
-                ?filename_field(true, #{in => path}),
-                ?node_field(false, #{in => query})
+                field_filename(true, #{in => path}),
+                field_node(false, #{in => query})
             ],
             responses => #{
                 204 => <<"No Content">>,
@@ -183,8 +170,8 @@ fields(files_response) ->
     ];
 fields(backup_file_info) ->
     [
-        ?node_field(true),
-        ?filename_field(true),
+        field_node(true),
+        field_filename(true),
         {created_at,
             ?HOCON(binary(), #{
                 desc => "Data backup file creation date and time",
@@ -219,10 +206,10 @@ fields(export_request_body) ->
             )}
     ];
 fields(import_request_body) ->
-    [?node_field(false), ?filename_field(true)];
+    [field_node(false), field_filename(true)];
 fields(data_backup_file) ->
     [
-        ?filename_field(true),
+        field_filename(true),
         {file,
             ?HOCON(binary(), #{
                 desc => "Data backup file content",
@@ -230,16 +217,39 @@ fields(data_backup_file) ->
             })}
     ].
 
+field_node(IsRequired) ->
+    field_node(IsRequired, #{}).
+
+field_node(IsRequired, Meta) ->
+    {node, ?HOCON(binary(), Meta#{desc => "Node name", required => IsRequired})}.
+
+field_filename(IsRequired) ->
+    field_filename(IsRequired, #{}).
+
+field_filename(IsRequired, Meta) ->
+    {filename,
+        ?HOCON(binary(), Meta#{
+            desc => "Data backup file name",
+            required => IsRequired
+        })}.
+
 %%------------------------------------------------------------------------------
 %% HTTP API Callbacks
 %%------------------------------------------------------------------------------
 
 data_export(post, #{body := Params}) ->
     maybe
+        ok ?= validate_export_root_keys(Params),
         {ok, Opts} ?= parse_export_request(Params),
         {ok, #{filename := FileName} = File} ?= emqx_mgmt_data_backup:export(Opts),
         {200, File#{filename => filename:basename(FileName)}}
     else
+        {error, {unknown_root_keys, UnknownKeys}} ->
+            Msg = iolist_to_binary([
+                <<"Invalid root keys: ">>,
+                lists:join(<<", ">>, UnknownKeys)
+            ]),
+            {400, #{code => ?BAD_REQUEST, message => Msg}};
         {error, {bad_table_sets, InvalidSetNames}} ->
             Msg = iolist_to_binary([
                 <<"Invalid table sets: ">>,
@@ -342,6 +352,18 @@ parse_export_request(Params) ->
             {error, {bad_table_sets, InvalidSetNames}}
     end.
 
+validate_export_root_keys(Params) ->
+    RootKeys0 = maps:get(<<"root_keys">>, Params, []),
+    RootKeys = lists:usort(RootKeys0),
+    RootNames = emqx_config:get_root_names(),
+    UnknownKeys = RootKeys -- RootNames,
+    case UnknownKeys of
+        [] ->
+            ok;
+        [_ | _] ->
+            {error, {unknown_root_keys, UnknownKeys}}
+    end.
+
 get_or_delete_file(get, Filename, Node) ->
     emqx_mgmt_data_backup_proto_v1:read_file(Node, Filename, infinity);
 get_or_delete_file(delete, Filename, Node) ->
@@ -425,7 +447,6 @@ export_request_example() ->
         table_sets => [
             <<"banned">>,
             <<"builtin_authn">>,
-            <<"builtin_authn_scram">>,
             <<"builtin_authz">>
         ],
         root_keys => [

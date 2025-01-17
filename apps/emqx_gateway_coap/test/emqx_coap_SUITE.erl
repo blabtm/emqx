@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -541,6 +541,8 @@ t_clients_api(_) ->
             request(get, "/gateways/coap/clients/client1"),
         %% assert
         Client1 = Client2 = Client3 = Client4,
+        %% assert keepalive
+        ?assertEqual(15, maps:get(keepalive, Client4)),
         %% kickout
         {204, _} =
             request(delete, "/gateways/coap/clients/client1"),

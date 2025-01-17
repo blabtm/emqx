@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_bridge_sqlserver_connector).
@@ -563,9 +563,9 @@ apply_template(Query, Templates, _) ->
     {error, failed_to_apply_sql_template}.
 
 proc_msg(Tokens, Msg, #{undefined_vars_as_null := true}) ->
-    emqx_placeholder:proc_sql_param_str2(Tokens, Msg);
+    emqx_placeholder:proc_sqlserver_param_str2(Tokens, Msg);
 proc_msg(Tokens, Msg, _) ->
-    emqx_placeholder:proc_sql_param_str(Tokens, Msg).
+    emqx_placeholder:proc_sqlserver_param_str(Tokens, Msg).
 
 to_bin(List) when is_list(List) ->
     unicode:characters_to_binary(List, utf8).

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_crl_cache_SUITE).
@@ -229,6 +229,18 @@ end_per_testcase(_TestCase, Config) ->
         proplists:get_value(tc_apps, Config)
     ),
     catch meck:unload([emqx_crl_cache]),
+    case whereis(emqx_crl_cache) of
+        Pid when is_pid(Pid) ->
+            MRef = monitor(process, Pid),
+            unlink(Pid),
+            exit(Pid, kill),
+            receive
+                {'DOWN', MRef, process, Pid, _} ->
+                    ok
+            end;
+        _ ->
+            ok
+    end,
     ok.
 
 %%--------------------------------------------------------------------
@@ -874,6 +886,7 @@ t_revoked(Config) ->
     ClientCert = filename:join(DataDir, "client-revoked.cert.pem"),
     ClientKey = filename:join(DataDir, "client-revoked.key.pem"),
     {ok, C} = emqtt:start_link([
+        {connect_timeout, 2},
         {ssl, true},
         {ssl_opts, [
             {certfile, ClientCert},

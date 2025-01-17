@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -957,6 +957,9 @@ t_rest_clientid_info(_) ->
             StompClient
         ),
 
+        %% assert keepalive
+        ?assertEqual(10, maps:get(keepalive, StompClient)),
+
         %% sub & unsub
         {200, []} = request(get, ClientPath ++ "/subscriptions"),
         ok = send_subscribe_frame(Sock, 0, <<"/queue/foo">>),
@@ -1222,7 +1225,7 @@ get_field(body, #stomp_frame{body = Body}) ->
     Body.
 
 send_connection_frame(Sock, Username, Password) ->
-    send_connection_frame(Sock, Username, Password, <<"0,0">>).
+    send_connection_frame(Sock, Username, Password, <<"10000,10000">>).
 
 send_connection_frame(Sock, Username, Password, Heartbeat) ->
     Headers =

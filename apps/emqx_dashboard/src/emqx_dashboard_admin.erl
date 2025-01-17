@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -331,7 +331,11 @@ change_password(Username, Password) when is_binary(Username), is_binary(Password
 change_password_hash(Username, PasswordHash) ->
     ChangePWD =
         fun(User) ->
-            User#?ADMIN{pwdhash = PasswordHash}
+            Extra = User#?ADMIN.extra,
+            User#?ADMIN{
+                pwdhash = PasswordHash,
+                extra = Extra#{password_ts => erlang:system_time(second)}
+            }
         end,
     case update_pwd(Username, ChangePWD) of
         {ok, Result} ->

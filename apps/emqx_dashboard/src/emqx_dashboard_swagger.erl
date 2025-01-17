@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -64,13 +64,6 @@
     %% for example, HTTP headers (which is a map type)
     is_template
 ]).
-
--define(INIT_SCHEMA, #{
-    fields => #{},
-    translations => #{},
-    validations => [],
-    namespace => undefined
-}).
 
 -define(TO_REF(_N_, _F_), iolist_to_binary([to_bin(_N_), ".", to_bin(_F_)])).
 -define(TO_COMPONENTS_SCHEMA(_M_, _F_),
@@ -443,7 +436,7 @@ failed_to_generate_swagger_spec(Module, Path, Error, Reason, Stacktrace) ->
         standard_error,
         "Failed to generate swagger for path ~p in module ~p~n"
         "error:~p~nreason:~p~n~p~n",
-        [Module, Path, Error, Reason, Stacktrace]
+        [Path, Module, Error, Reason, Stacktrace]
     ),
     error({failed_to_generate_swagger_spec, Module, Path}).
 
@@ -486,14 +479,14 @@ check_parameter([], _Bindings, _QueryStr, _Module, NewBindings, NewQueryStr) ->
 check_parameter([{Name, Type} | Spec], Bindings, QueryStr, Module, BindingsAcc, QueryStrAcc) ->
     case hocon_schema:field_schema(Type, in) of
         path ->
-            Schema = ?INIT_SCHEMA#{roots => [{Name, Type}]},
+            Schema = #{roots => [{Name, Type}], fields => #{}},
             Option = #{atom_key => true},
             NewBindings = hocon_tconf:check_plain(Schema, Bindings, Option),
             NewBindingsAcc = maps:merge(BindingsAcc, NewBindings),
             check_parameter(Spec, Bindings, QueryStr, Module, NewBindingsAcc, QueryStrAcc);
         query ->
             Type1 = maybe_wrap_array_qs_param(Type),
-            Schema = ?INIT_SCHEMA#{roots => [{Name, Type1}]},
+            Schema = #{roots => [{Name, Type1}], fields => #{}},
             Option = #{},
             NewQueryStr = hocon_tconf:check_plain(Schema, QueryStr, Option),
             NewQueryStrAcc = maps:merge(QueryStrAcc, NewQueryStr),
@@ -575,7 +568,7 @@ check_request_body(#{body := Body}, Schema, Module, CheckFun, true) ->
                     Fun when is_function(Fun) ->
                         [{validator, fun(#{<<"root">> := B}) -> Fun(B) end}]
                 end,
-            NewSchema = ?INIT_SCHEMA#{roots => [{root, Type}], validations => Validations},
+            NewSchema = #{roots => [{root, Type}], fields => #{}, validations => Validations},
             Option = #{required => false},
             #{<<"root">> := NewBody} = CheckFun(NewSchema, #{<<"root">> => Body}, Option),
             {ok, NewBody};
@@ -593,7 +586,7 @@ check_request_body(#{body := Body}, Spec, _Module, CheckFun, false) when is_list
     {ok,
         lists:foldl(
             fun({Name, Type}, Acc) ->
-                Schema = ?INIT_SCHEMA#{roots => [{Name, Type}]},
+                Schema = #{roots => [{Name, Type}], fields => #{}},
                 maps:merge(Acc, CheckFun(Schema, Body, #{}))
             end,
             #{},

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -23,8 +23,6 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
-
--define(LOGT(Format, Args), ct:pal("TEST_SUITE: " ++ Format, Args)).
 
 %% erlfmt-ignore
 -define(EMQX_CONF, <<"
@@ -285,7 +283,7 @@ accept('application/json') ->
 do_assert_prom_data([], _Mode) ->
     ok;
 do_assert_prom_data([Metric | RestDataL], Mode) ->
-    [_MetricNamme | _] = Metric,
+    [_MetricName | _] = Metric,
     assert_stats_metric_labels(Metric, Mode),
     do_assert_prom_data(RestDataL, Mode).
 
@@ -334,6 +332,8 @@ metric_meta(<<"emqx_vm_run_queue">>) -> ?meta(0, 1, 1);
 metric_meta(<<"emqx_vm_process_messages_in_queues">>) -> ?meta(0, 1, 1);
 metric_meta(<<"emqx_vm_total_memory">>) -> ?meta(0, 1, 1);
 metric_meta(<<"emqx_vm_used_memory">>) -> ?meta(0, 1, 1);
+metric_meta(<<"emqx_vm_mnesia_tm_mailbox_size">>) -> ?meta(0, 1, 1);
+metric_meta(<<"emqx_vm_broker_pool_max_mailbox_size">>) -> ?meta(0, 1, 1);
 metric_meta(<<"emqx_cluster_nodes_running">>) -> ?meta(0, 1, 1);
 metric_meta(<<"emqx_cluster_nodes_stopped">>) -> ?meta(0, 1, 1);
 metric_meta(<<"emqx_conf_sync_txid">>) -> ?meta(0, 1, 1);
@@ -691,12 +691,12 @@ eval_foreach_assert(FunctionName, Ms) ->
     end,
     Fun().
 
--if(?EMQX_RELEASE_EDITION == ee).
 %% license always map
 assert_json_data__license(M, _) ->
-    ?assertMatch(#{emqx_license_expiry_at := _}, M).
--else.
--endif.
+    case emqx_release:edition() of
+        ce -> ok;
+        ee -> ?assertMatch(#{emqx_license_expiry_at := _}, M)
+    end.
 
 -define(assert_node_foreach(Ms), lists:foreach(fun(M) -> ?assertMatch(#{node := _}, M) end, Ms)).
 
@@ -844,29 +844,28 @@ assert_json_data__connectors(Ms, ?PROM_DATA_MODE__ALL_NODES_UNAGGREGATED) when
 ->
     ?assert_node_foreach(Ms).
 
--if(?EMQX_RELEASE_EDITION == ee).
 assert_json_data__data_integration_overview(M, _) ->
-    ?assertMatch(
-        #{
-            emqx_connectors_count := _,
-            emqx_rules_count := _,
-            emqx_actions_count := _,
-            emqx_schema_registrys_count := _
-        },
-        M
-    ).
-
--else.
-assert_json_data__data_integration_overview(M, _) ->
-    ?assertMatch(
-        #{
-            emqx_connectors_count := _,
-            emqx_rules_count := _,
-            emqx_actions_count := _
-        },
-        M
-    ).
--endif.
+    case emqx_release:edition() of
+        ee ->
+            ?assertMatch(
+                #{
+                    emqx_connectors_count := _,
+                    emqx_rules_count := _,
+                    emqx_actions_count := _,
+                    emqx_schema_registrys_count := _
+                },
+                M
+            );
+        ce ->
+            ?assertMatch(
+                #{
+                    emqx_connectors_count := _,
+                    emqx_rules_count := _,
+                    emqx_actions_count := _
+                },
+                M
+            )
+    end.
 
 assert_json_data__schema_validations(Ms, _) ->
     lists:foreach(

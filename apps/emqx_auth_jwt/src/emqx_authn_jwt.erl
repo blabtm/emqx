@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -389,7 +389,7 @@ handle_verify_claims(VerifyClaims) ->
 handle_verify_claims([], Acc) ->
     Acc;
 handle_verify_claims([{Name, Expected0} | More], Acc) ->
-    Expected1 = emqx_auth_template:parse_str(Expected0, ?ALLOWED_VARS),
+    {_, Expected1} = emqx_auth_template:parse_str(Expected0, ?ALLOWED_VARS),
     handle_verify_claims(More, [{Name, Expected1} | Acc]).
 
 binary_to_number(Bin) ->

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -330,14 +330,13 @@ render_pub_props(UserPropertiesTemplate, Selected, Env) ->
 -define(BADPROP(K, REASON, ENV, DATA),
     ?SLOG(
         debug,
-        DATA#{
+        ?MAPPEND(DATA, #{
+            tag => ?TAG,
             msg => "bad_mqtt_property_value_ignored",
             rule_id => emqx_utils_maps:deep_get([metadata, rule_id], ENV, undefined),
             reason => REASON,
             property => K
-        }#{
-            tag => ?TAG
-        }
+        })
     )
 ).
 

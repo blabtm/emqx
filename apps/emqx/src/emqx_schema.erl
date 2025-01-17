@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2017-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2017-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
 %%--------------------------------------------------------------------
 
 -module(emqx_schema).
+-feature(maybe_expr, enable).
 
 -dialyzer(no_return).
 -dialyzer(no_match).
@@ -29,7 +30,7 @@
 -include_lib("hocon/include/hoconsc.hrl").
 -include_lib("logger.hrl").
 
--define(MAX_INT_MQTT_PACKET_SIZE, 268435456).
+-define(MAX_INT_MQTT_PACKET_SIZE, 268435455).
 -define(MAX_INT_TIMEOUT_MS, 4294967295).
 %% floor(?MAX_INT_TIMEOUT_MS / 1000).
 -define(MAX_INT_TIMEOUT_S, 4294967).
@@ -92,10 +93,12 @@
 
 -export([
     validate_heap_size/1,
-    validate_packet_size/1,
+    validate_max_packet_size/1,
+    convert_max_packet_size/2,
     user_lookup_fun_tr/2,
     validate_keepalive_multiplier/1,
     non_empty_string/1,
+    non_empty_array/1,
     validations/0,
     naive_env_interpolation/1,
     ensure_unicode_path/2,
@@ -1456,6 +1459,22 @@ fields("sysmon") ->
                 %% Userful monitoring solution when benchmarking,
                 %% but hardly common enough for regular users.
                 #{importance => ?IMPORTANCE_HIDDEN}
+            )},
+        {"mnesia_tm_mailbox_size_alarm_threshold",
+            sc(
+                pos_integer(),
+                #{
+                    default => 500,
+                    desc => ?DESC("sysmon_mnesia_tm_mailbox_size_alarm_threshold")
+                }
+            )},
+        {"broker_pool_mailbox_size_alarm_threshold",
+            sc(
+                pos_integer(),
+                #{
+                    default => 500,
+                    desc => ?DESC("sysmon_broker_pool_mailbox_size_alarm_threshold")
+                }
             )}
     ];
 fields("sysmon_vm") ->
@@ -2650,22 +2669,37 @@ mk_duration(Desc, OverrideMeta) ->
 
 to_duration(Str) ->
     case hocon_postprocess:duration(Str) of
-        I when is_integer(I) -> {ok, I};
-        _ -> to_integer(Str)
+        D when is_integer(D) ->
+            {ok, D};
+        _ ->
+            case to_integer(Str) of
+                {ok, I} -> {ok, I};
+                {error, _} -> {error, "Not a valid duration"}
+            end
     end.
 
 to_duration_s(Str) ->
     case hocon_postprocess:duration(Str) of
-        I when is_number(I) -> {ok, ceiling(I / 1000)};
-        _ -> to_integer(Str)
+        D when is_number(D) ->
+            {ok, ceiling(D / 1000)};
+        _ ->
+            case to_integer(Str) of
+                {ok, I} -> {ok, I};
+                {error, _} -> {error, "Not a valid duration"}
+            end
     end.
 
--spec to_duration_ms(Input) -> {ok, integer()} | {error, Input} when
+-spec to_duration_ms(Input) -> {ok, integer()} | {error, string()} when
     Input :: string() | binary().
 to_duration_ms(Str) ->
     case hocon_postprocess:duration(Str) of
-        I when is_number(I) -> {ok, ceiling(I)};
-        _ -> to_integer(Str)
+        D when is_number(D) ->
+            {ok, ceiling(D)};
+        _ ->
+            case to_integer(Str) of
+                {ok, I} -> {ok, I};
+                {error, _} -> {error, "Not a valid duration"}
+            end
     end.
 
 -spec to_timeout_duration(Input) -> {ok, timeout_duration()} | {error, Input} when
@@ -2685,28 +2719,26 @@ to_timeout_duration_s(Str) ->
 
 do_to_timeout_duration(Str, Fn, Max, Unit) ->
     case Fn(Str) of
-        {ok, I} ->
-            case I =< Max of
-                true ->
-                    {ok, I};
-                false ->
-                    Msg = lists:flatten(
-                        io_lib:format("timeout value too large (max: ~b ~s)", [Max, Unit])
-                    ),
-                    throw(#{
-                        schema_module => ?MODULE,
-                        message => Msg,
-                        kind => validation_error
-                    })
-            end;
+        {ok, I} when I =< Max ->
+            {ok, I};
+        {ok, _} ->
+            Msg = lists:flatten(
+                io_lib:format("timeout value too large (max: ~b ~s)", [Max, Unit])
+            ),
+            {error, Msg};
         Err ->
             Err
     end.
 
 to_bytesize(Str) ->
     case hocon_postprocess:bytesize(Str) of
-        I when is_integer(I) -> {ok, I};
-        _ -> to_integer(Str)
+        BS when is_integer(BS) ->
+            {ok, BS};
+        _ ->
+            case to_integer(Str) of
+                {ok, I} -> {ok, I};
+                {error, _} -> {error, "Not a valid bytesize"}
+            end
     end.
 
 to_wordsize(Str) ->
@@ -2750,10 +2782,13 @@ to_url(Str) ->
 
 to_json_binary(Str) ->
     case emqx_utils_json:safe_decode(Str) of
-        {ok, _} ->
-            {ok, unicode:characters_to_binary(Str)};
-        Error ->
-            Error
+        {ok, _} -> {ok, unicode:characters_to_binary(Str)};
+        {error, {_Pos, truncated_json}} -> {error, "Truncated JSON value"};
+        {error, {_Pos, invalid_literal}} -> {error, "Invalid JSON literal"};
+        {error, {_Pos, invalid_number}} -> {error, "Invalid JSON number"};
+        {error, {_Pos, invalid_string}} -> {error, "Invalid JSON string"};
+        {error, {_Pos, invalid_json}} -> {error, "Invalid JSON"};
+        Error -> Error
     end.
 
 to_template(Str) ->
@@ -2772,13 +2807,14 @@ to_ip_port(Str) ->
     case split_ip_port(Str) of
         {"", Port} ->
             %% this is a local address
-            {ok, parse_port(Port)};
+            parse_port(Port);
         {MaybeIp, Port} ->
-            PortVal = parse_port(Port),
-            case inet:parse_address(MaybeIp) of
-                {ok, IpTuple} ->
-                    {ok, {IpTuple, PortVal}};
-                _ ->
+            maybe
+                {ok, PortVal} ?= parse_port(Port),
+                {ok, IpTuple} ?= inet:parse_address(MaybeIp),
+                {ok, {IpTuple, PortVal}}
+            else
+                {error, _} ->
                     {error, bad_ip_port}
             end;
         _ ->
@@ -2807,7 +2843,7 @@ split_ip_port(Str0) ->
 
 to_erl_cipher_suite(Str) ->
     case ssl:str_to_suite(Str) of
-        {error, Reason} -> error({invalid_cipher, Reason});
+        {error, Reason} -> {error, {invalid_cipher, Reason}};
         Cipher -> Cipher
     end.
 
@@ -2835,15 +2871,24 @@ validate_heap_size(Siz) when is_integer(Siz) ->
 validate_heap_size(_SizStr) ->
     {error, invalid_heap_size}.
 
-validate_packet_size(Siz) when is_integer(Siz) andalso Siz < 1 ->
-    {error, #{reason => max_mqtt_packet_size_too_small, minimum => 1}};
-validate_packet_size(Siz) when is_integer(Siz) andalso Siz > ?MAX_INT_MQTT_PACKET_SIZE ->
-    Max = integer_to_list(round(?MAX_INT_MQTT_PACKET_SIZE / 1024 / 1024)) ++ "M",
-    {error, #{reason => max_mqtt_packet_size_too_large, maximum => Max}};
-validate_packet_size(Siz) when is_integer(Siz) ->
+validate_max_packet_size(Siz) when is_integer(Siz) andalso Siz < 1 ->
+    {error, #{cause => max_mqtt_packet_size_too_small, minimum => 1}};
+validate_max_packet_size(Siz) when is_integer(Siz) andalso Siz > ?MAX_INT_MQTT_PACKET_SIZE ->
+    {error, #{
+        cause => max_mqtt_packet_size_too_large,
+        maximum => ?MAX_INT_MQTT_PACKET_SIZE
+    }};
+validate_max_packet_size(Siz) when is_integer(Siz) ->
     ok;
-validate_packet_size(_SizStr) ->
+validate_max_packet_size(_SizStr) ->
     {error, invalid_packet_size}.
+
+%% This is for backward compatibility.
+%% We used to allow setting 256MB, but in fact the limit is one byte less.
+convert_max_packet_size(<<"256MB">>, _) ->
+    ?MAX_INT_MQTT_PACKET_SIZE;
+convert_max_packet_size(X, _) ->
+    X.
 
 validate_keepalive_multiplier(Multiplier) when
     is_number(Multiplier) andalso Multiplier >= 1.0 andalso Multiplier =< 65535.0
@@ -3022,6 +3067,13 @@ non_empty_string(<<>>) -> {error, empty_string_not_allowed};
 non_empty_string("") -> {error, empty_string_not_allowed};
 non_empty_string(S) when is_binary(S); is_list(S) -> ok;
 non_empty_string(_) -> {error, invalid_string}.
+
+non_empty_array([]) ->
+    {error, empty_array_not_allowed};
+non_empty_array(List) when is_list(List) ->
+    ok;
+non_empty_array(_) ->
+    {error, invalid_data}.
 
 %% @doc Make schema for 'server' or 'servers' field.
 %% for each field, there are three passes:
@@ -3214,7 +3266,7 @@ check_server_parts([Scheme, "//" ++ Hostname, Port], Context) ->
     #{
         scheme => check_scheme(Scheme, Opts),
         hostname => check_hostname(Hostname),
-        port => parse_port(Port)
+        port => parse_port_(Port)
     };
 check_server_parts([Scheme, "//" ++ Hostname], Context) ->
     #{
@@ -3249,13 +3301,13 @@ check_server_parts([Hostname, Port], Context) ->
         false ->
             #{
                 hostname => check_hostname(Hostname),
-                port => parse_port(Port)
+                port => parse_port_(Port)
             };
         true ->
             #{
                 scheme => DefaultScheme,
                 hostname => check_hostname(Hostname),
-                port => parse_port(Port)
+                port => parse_port_(Port)
             }
     end;
 check_server_parts([Hostname], Context) ->
@@ -3344,21 +3396,26 @@ convert_hocon_map_host_port(Map) ->
         hocon_maps:flatten(Map, #{})
     ).
 
-is_port_number(Port) ->
-    try
-        _ = parse_port(Port),
-        true
-    catch
-        _:_ ->
-            false
+is_port_number(Str) ->
+    {Status, _} = parse_port(Str),
+    Status == ok.
+
+parse_port_(Str) ->
+    case parse_port(Str) of
+        {ok, Port} -> Port;
+        {error, Reason} -> throw(Reason)
     end.
 
 parse_port(Port) ->
     case string:to_integer(string:strip(Port)) of
-        {P, ""} when P < 0 -> throw("port_number_must_be_positive");
-        {P, ""} when P > 65535 -> throw("port_number_too_large");
-        {P, ""} -> P;
-        _ -> throw("bad_port_number")
+        {P, ""} when P < 0 ->
+            {error, "port_number_must_be_positive"};
+        {P, ""} when P > 65535 ->
+            {error, "port_number_too_large"};
+        {P, ""} ->
+            {ok, P};
+        _ ->
+            {error, "bad_port_number"}
     end.
 
 quic_feature_toggle(Desc) ->
@@ -3604,7 +3661,8 @@ mqtt_general() ->
                 bytesize(),
                 #{
                     default => <<"1MB">>,
-                    validator => fun ?MODULE:validate_packet_size/1,
+                    validator => fun ?MODULE:validate_max_packet_size/1,
+                    converter => fun ?MODULE:convert_max_packet_size/2,
                     desc => ?DESC(mqtt_max_packet_size)
                 }
             )},

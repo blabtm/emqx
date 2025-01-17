@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_authn_scram_restapi_SUITE).
@@ -28,10 +28,8 @@
 
 all() ->
     case emqx_release:edition() of
-        ce ->
-            [];
-        _ ->
-            emqx_common_test_helpers:all(?MODULE)
+        ce -> [];
+        ee -> emqx_common_test_helpers:all(?MODULE)
     end.
 
 init_per_suite(Config) ->

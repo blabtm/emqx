@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -121,7 +121,7 @@
 -define(maybe_log_node_errors(LogData, Errors),
     case Errors of
         [] -> ok;
-        _ -> ?SLOG(error, (LogData)#{node_errors => Errors})
+        _ -> ?SLOG(error, ?MAPPEND(LogData, #{node_errors => Errors}))
     end
 ).
 
@@ -201,6 +201,8 @@ vm_stats() ->
     cpu_stats() ++
         [
             {run_queue, vm_stats('run.queue')},
+            {mnesia_tm_mailbox_size, emqx_broker_mon:get_mnesia_tm_mailbox_size()},
+            {broker_pool_max_mailbox_size, emqx_broker_mon:get_broker_pool_max_mailbox_size()},
             {total_memory, MemTotal},
             {used_memory, erlang:round(MemTotal * MemUsedRatio)}
         ].

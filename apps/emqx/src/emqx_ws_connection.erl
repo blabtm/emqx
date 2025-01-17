@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2018-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2018-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@
 %% MQTT/WS|WSS Connection
 -module(emqx_ws_connection).
 
--include("emqx.hrl").
 -include("emqx_cm.hrl").
 -include("emqx_mqtt.hrl").
 -include("logger.hrl").
@@ -120,7 +119,6 @@
 
 -type ws_cmd() :: {active, boolean()} | close.
 
--define(ACTIVE_N, 10).
 -define(INFO_KEYS, [socktype, peername, sockname, sockstate]).
 -define(SOCK_STATS, [recv_oct, recv_cnt, send_oct, send_cnt]).
 
@@ -128,7 +126,7 @@
 -define(LIMITER_BYTES_IN, bytes).
 -define(LIMITER_MESSAGE_IN, messages).
 
--define(LOG(Level, Data), ?SLOG(Level, (Data)#{tag => "MQTT"})).
+-define(LOG(Level, Data), ?SLOG(Level, ?MAPPEND(Data, #{tag => "MQTT"}))).
 
 %%--------------------------------------------------------------------
 %% Info, Stats
@@ -1081,7 +1079,7 @@ check_max_connection(Type, Listener) ->
         infinity ->
             allow;
         Max ->
-            MatchSpec = [{{'_', emqx_ws_connection}, [], [true]}],
+            MatchSpec = [{#chan_conn{mod = emqx_ws_connection, _ = '_'}, [], [true]}],
             Curr = ets:select_count(?CHAN_CONN_TAB, MatchSpec),
             case Curr >= Max of
                 false ->

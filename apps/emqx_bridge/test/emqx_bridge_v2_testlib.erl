@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 -module(emqx_bridge_v2_testlib).
 
@@ -22,14 +22,17 @@ end).
 
 %% ct setup helpers
 
+%% Deprecated: better to inline the setup in the test suite.
 init_per_suite(Config, Apps) ->
     [{start_apps, Apps} | Config].
 
+%% Deprecated: better to inline the setup in the test suite.
 end_per_suite(Config) ->
     Apps = ?config(apps, Config),
-    emqx_cth_suite:stop(Apps),
+    emqx_maybe:apply(fun emqx_cth_suite:stop/1, Apps),
     ok.
 
+%% Deprecated: better to inline the setup in the test suite.
 init_per_group(TestGroup, BridgeType, Config) ->
     ProxyHost = os:getenv("PROXY_HOST", "toxiproxy"),
     ProxyPort = list_to_integer(os:getenv("PROXY_PORT", "8474")),
@@ -50,6 +53,7 @@ init_per_group(TestGroup, BridgeType, Config) ->
         | Config
     ].
 
+%% Deprecated: better to inline the setup in the test suite.
 end_per_group(Config) ->
     Apps = ?config(apps, Config),
     ProxyHost = ?config(proxy_host, Config),
@@ -58,6 +62,7 @@ end_per_group(Config) ->
     emqx_cth_suite:stop(Apps),
     ok.
 
+%% Deprecated: better to inline the setup in the test suite.
 init_per_testcase(TestCase, Config0, BridgeConfigCb) ->
     ct:timetrap(timer:seconds(60)),
     delete_all_bridges_and_connectors(),
@@ -80,6 +85,7 @@ init_per_testcase(TestCase, Config0, BridgeConfigCb) ->
         | Config
     ].
 
+%% Deprecated: better to inline the setup in the test suite.
 end_per_testcase(_Testcase, Config) ->
     case proplists:get_bool(skip_does_not_apply, Config) of
         true ->
@@ -271,7 +277,7 @@ maybe_json_decode(X) ->
     end.
 
 request(Method, Path, Params) ->
-    AuthHeader = emqx_mgmt_api_test_util:auth_header_(),
+    AuthHeader = auth_header(),
     Opts = #{return_all => true},
     case emqx_mgmt_api_test_util:request_api(Method, Path, "", AuthHeader, Params, Opts) of
         {ok, {Status, Headers, Body0}} ->
@@ -319,6 +325,16 @@ list_bridges_api() ->
 
 get_source_api(BridgeType, BridgeName) ->
     get_bridge_api(source, BridgeType, BridgeName).
+
+get_source_metrics_api(Config) ->
+    SourceName = ?config(source_name, Config),
+    SourceType = ?config(source_type, Config),
+    SourceId = emqx_bridge_resource:bridge_id(SourceType, SourceName),
+    Path = emqx_mgmt_api_test_util:api_path(["sources", SourceId, "metrics"]),
+    ct:pal("getting source metrics (http)"),
+    Res = request(get, Path, []),
+    ct:pal("get source metrics (http) result:\n  ~p", [Res]),
+    simplify_result(Res).
 
 get_bridge_api(BridgeType, BridgeName) ->
     get_bridge_api(action, BridgeType, BridgeName).
@@ -606,6 +622,20 @@ list_connectors_http_api() ->
     ct:pal("list connectors result:\n  ~p", [Res]),
     Res.
 
+summarize_actions_api() ->
+    Path = emqx_mgmt_api_test_util:api_path(["actions_summary"]),
+    ct:pal("summarize actions"),
+    Res = request(get, Path, _Params = []),
+    ct:pal("summarize actions result:\n  ~p", [Res]),
+    simplify_result(Res).
+
+summarize_sources_api() ->
+    Path = emqx_mgmt_api_test_util:api_path(["sources_summary"]),
+    ct:pal("summarize sources"),
+    Res = request(get, Path, _Params = []),
+    ct:pal("summarize sources result:\n  ~p", [Res]),
+    simplify_result(Res).
+
 enable_kind_http_api(Config) ->
     do_enable_disable_kind_http_api(enable, Config).
 
@@ -681,6 +711,9 @@ create_rule_api(Opts) ->
     ct:pal("create rule results:\n  ~p", [Res]),
     Res.
 
+get_rule_metrics(RuleId) ->
+    emqx_metrics_worker:get_metrics(rule_metrics, RuleId).
+
 create_rule_and_action_http(BridgeType, RuleTopic, Config) ->
     create_rule_and_action_http(BridgeType, RuleTopic, Config, _Opts = #{}).
 
@@ -696,16 +729,24 @@ create_rule_and_action_http(BridgeType, RuleTopic, Config, Opts) ->
     Overrides = maps:get(overrides, Opts, #{}),
     Params = emqx_utils_maps:deep_merge(Params0, Overrides),
     Path = emqx_mgmt_api_test_util:api_path(["rules"]),
-    AuthHeader = emqx_mgmt_api_test_util:auth_header_(),
+    AuthHeader = auth_header(),
     ct:pal("rule action params: ~p", [Params]),
     case emqx_mgmt_api_test_util:request_api(post, Path, "", AuthHeader, Params) of
         {ok, Res0} ->
             Res = #{<<"id">> := RuleId} = emqx_utils_json:decode(Res0, [return_maps]),
-            on_exit(fun() -> ok = emqx_rule_engine:delete_rule(RuleId) end),
+            AuthHeaderGetter = get_auth_header_getter(),
+            on_exit(fun() ->
+                set_auth_header_getter(AuthHeaderGetter),
+                {204, _} = delete_rule_api(RuleId)
+            end),
             {ok, Res};
         Error ->
             Error
     end.
+
+delete_rule_api(RuleId) ->
+    Path = emqx_mgmt_api_test_util:api_path(["rules", RuleId]),
+    simplify_result(request(delete, Path, "")).
 
 api_spec_schemas(Root) ->
     Method = get,
@@ -1391,5 +1432,27 @@ proplist_update(Proplist, K, Fn) ->
     {K, OldV} = lists:keyfind(K, 1, Proplist),
     NewV = Fn(OldV),
     lists:keystore(K, 1, Proplist, {K, NewV}).
+
+-define(AUTH_HEADER_FN_PD_KEY, {?MODULE, auth_header_fn}).
+get_auth_header_getter() ->
+    get(?AUTH_HEADER_FN_PD_KEY).
+
+%% Note: must be set in init_per_testcase, as this is stored in process dictionary.
+set_auth_header_getter(Fun) ->
+    _ = put(?AUTH_HEADER_FN_PD_KEY, Fun),
+    ok.
+
+clear_auth_header_getter() ->
+    _ = erase(?AUTH_HEADER_FN_PD_KEY),
+    ok.
+-undef(AUTH_HEADER_FN_PT_KEY).
+
+auth_header() ->
+    case get_auth_header_getter() of
+        Fun when is_function(Fun, 0) ->
+            Fun();
+        _ ->
+            emqx_mgmt_api_test_util:auth_header_()
+    end.
 
 bin(X) -> emqx_utils_conv:bin(X).

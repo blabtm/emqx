@@ -36,7 +36,7 @@ assert_otp() ->
     end.
 
 quicer() ->
-    {quicer, {git, "https://github.com/emqx/quic.git", {tag, "0.1.10"}}}.
+    {quicer, {git, "https://github.com/emqx/quic.git", {tag, "0.1.11"}}}.
 
 jq() ->
     {jq, {git, "https://github.com/emqx/jq", {tag, "v0.3.12"}}}.
@@ -101,6 +101,7 @@ is_community_umbrella_app("apps/emqx_bridge_timescale") -> false;
 is_community_umbrella_app("apps/emqx_bridge_oracle") -> false;
 is_community_umbrella_app("apps/emqx_bridge_sqlserver") -> false;
 is_community_umbrella_app("apps/emqx_bridge_datalayers") -> false;
+is_community_umbrella_app("apps/emqx_bridge_tablestore") -> false;
 is_community_umbrella_app("apps/emqx_oracle") -> false;
 is_community_umbrella_app("apps/emqx_bridge_rabbitmq") -> false;
 is_community_umbrella_app("apps/emqx_ft") -> false;
@@ -119,6 +120,7 @@ is_community_umbrella_app("apps/emqx_gcp_device") -> false;
 is_community_umbrella_app("apps/emqx_dashboard_rbac") -> false;
 is_community_umbrella_app("apps/emqx_dashboard_sso") -> false;
 is_community_umbrella_app("apps/emqx_audit") -> false;
+is_community_umbrella_app("apps/emqx_mt") -> false;
 is_community_umbrella_app("apps/emqx_gateway_gbt32960") -> false;
 is_community_umbrella_app("apps/emqx_gateway_ocpp") -> false;
 is_community_umbrella_app("apps/emqx_gateway_jt808") -> false;
@@ -186,7 +188,7 @@ project_app_excluded("apps/" ++ AppStr, ExcludedApps) ->
 
 plugins() ->
     [
-        {emqx_relup, {git, "https://github.com/emqx/emqx-relup.git", {tag, "0.2.1"}}},
+        {emqx_relup, {git, "https://github.com/emqx/emqx-relup.git", {tag, "0.2.2"}}},
         %% emqx main project does not require port-compiler
         %% pin at root level for deterministic
         {pc, "v1.14.0"}

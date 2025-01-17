@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_bridge_v2_kafka_consumer_SUITE).
@@ -560,13 +560,23 @@ t_pretty_api_dry_run_reason(Config) ->
                 ),
                 ?assertMatch({400, _}, Res),
                 {400, #{<<"message">> := Msg}} = Res,
-                ?assertEqual(
-                    match,
-                    re:run(Msg, <<"Leader for partition . unavailable; reason: ">>, [
-                        {capture, none}
-                    ]),
-                    #{message => Msg}
-                )
+                LeaderUnavailable =
+                    match ==
+                        re:run(
+                            Msg,
+                            <<"Leader for partition . unavailable; reason: ">>,
+                            [{capture, none}]
+                        ),
+                %% In CI, if this tests runs soon enough, Kafka may not be stable yet, and
+                %% this failure might occur.
+                CoordinatorFailure =
+                    match ==
+                        re:run(
+                            Msg,
+                            <<"shutdown,coordinator_failure">>,
+                            [{capture, none}]
+                        ),
+                ?assert(LeaderUnavailable or CoordinatorFailure, #{message => Msg})
             end),
             %% Wait for recovery; avoids affecting other test cases due to Kafka restabilizing...
             ?retry(

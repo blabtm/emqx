@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -134,7 +134,7 @@ t_api(_) ->
         request(
             put,
             uri(["authorization", "sources", "built_in_database", "rules", "users", "user1"]),
-            ?USERNAME_RULES_EXAMPLE#{rules => []}
+            ?USERNAME_RULES_EXAMPLE(#{rules => []})
         ),
 
     %% check length limit
@@ -227,7 +227,7 @@ t_api(_) ->
         request(
             put,
             uri(["authorization", "sources", "built_in_database", "rules", "clients", "client1"]),
-            ?CLIENTID_RULES_EXAMPLE#{rules => []}
+            ?CLIENTID_RULES_EXAMPLE(#{rules => []})
         ),
 
     {ok, 400, _} =

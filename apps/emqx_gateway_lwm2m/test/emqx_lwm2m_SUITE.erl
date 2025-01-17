@@ -1,5 +1,5 @@
 %--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -2501,6 +2501,8 @@ case100_clients_api(Config) ->
         request(get, "/gateways/lwm2m/clients/" ++ binary_to_list(ClientId)),
     %% assert
     Client1 = Client2 = Client3 = Client4,
+    %% assert keepalive
+    ?assertEqual(345, maps:get(keepalive, Client4)),
     %% kickout
     {204, _} =
         request(delete, "/gateways/lwm2m/clients/" ++ binary_to_list(ClientId)),

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -37,6 +37,10 @@
 -export([
     parse_http_resp_body/2,
     content_type/1
+]).
+
+-export([
+    cached_simple_sync_query/3
 ]).
 
 -define(DEFAULT_RESOURCE_OPTS, #{
@@ -155,6 +159,9 @@ vars_for_rule_query(Client, ?authz_action(PubSub, Qos) = Action) ->
         qos => Qos,
         retain => maps:get(retain, Action, false)
     }.
+
+cached_simple_sync_query(CacheKey, ResourceID, Query) ->
+    emqx_auth_utils:cached_simple_sync_query(?AUTHZ_CACHE, CacheKey, ResourceID, Query).
 
 %%--------------------------------------------------------------------
 %% Internal functions

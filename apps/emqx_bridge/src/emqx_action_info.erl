@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -268,7 +268,7 @@ action_convert_from_connector(ActionOrBridgeType, ConnectorConfig, ActionConfig)
 connector_action_config_to_bridge_v1_config(ConnectorConfig, ActionConfig) ->
     Merged = emqx_utils_maps:deep_merge(
         maps:without(
-            [<<"connector">>],
+            [<<"connector">>, <<"last_modified_at">>],
             emqx_utils_maps:unindent(<<"parameters">>, ActionConfig)
         ),
         emqx_utils_maps:unindent(<<"parameters">>, ConnectorConfig)

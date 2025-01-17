@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -492,8 +492,8 @@ t_import_users_duplicated_records(_) ->
 %%------------------------------------------------------------------------------
 
 sample_filename(Name) ->
-    Dir = code:lib_dir(emqx_auth, test),
-    filename:join([Dir, <<"data">>, Name]).
+    Dir = code:lib_dir(emqx_auth),
+    filename:join([Dir, <<"test">>, <<"data">>, Name]).
 
 sample_filename_and_data(Name) ->
     sample_filename_and_data(hash, Name).

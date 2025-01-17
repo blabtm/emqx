@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -417,7 +417,7 @@ format_channel_info(WhichNode, {_, Infos, Stats} = R) ->
         {connected_at, {connected_at, ConnInfo, fun emqx_utils_calendar:epoch_to_rfc3339/1}},
         {disconnected_at, {disconnected_at, ConnInfo, fun emqx_utils_calendar:epoch_to_rfc3339/1}},
         {connected, {conn_state, Infos, fun conn_state_to_connected/1}},
-        {keepalive, ClientInfo, 0},
+        {keepalive, ConnInfo, 0},
         {clean_start, ConnInfo, true},
         {expiry_interval, ConnInfo, 0},
         {created_at, {created_at, SessInfo, fun emqx_utils_calendar:epoch_to_rfc3339/1}},

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -160,8 +160,8 @@ stop_apps(Apps) ->
     lists:foreach(fun application:stop/1, Apps).
 
 cert_path(FileName) ->
-    Dir = code:lib_dir(emqx_auth, test),
-    filename:join([Dir, <<"data/certs">>, FileName]).
+    Dir = code:lib_dir(emqx_auth),
+    filename:join([Dir, <<"test/data/certs">>, FileName]).
 
 cowboy_handler(Req0, State) ->
     Req = cowboy_req:reply(

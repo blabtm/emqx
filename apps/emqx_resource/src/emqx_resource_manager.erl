@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -115,7 +115,20 @@
 }).
 
 -type data() :: #data{}.
--type channel_status_map() :: #{status := channel_status(), error := term()}.
+-type channel_status_map() :: #{
+    status := channel_status(),
+    error := term(),
+    config := map()
+}.
+-type cache_channel_status_map() :: #{
+    status := channel_status(),
+    error := term(),
+    query_mode := emqx_resource:resource_query_mode()
+}.
+-type external_channel_status_map() :: #{
+    status := channel_status(),
+    error := term()
+}.
 
 -define(NAME(ResId), {n, l, {?MODULE, ResId}}).
 -define(REF(ResId), {via, gproc, ?NAME(ResId)}).
@@ -486,18 +499,65 @@ get_query_mode_and_last_error(RequestResId, Opts) ->
 do_get_query_mode_error(ResId, RequestResId, Opts) ->
     case emqx_resource_manager:lookup_cached(ResId) of
         {ok, _Group, ResourceData} ->
-            QM = get_query_mode(ResourceData, Opts),
+            QM = get_query_mode(RequestResId, ResourceData, Opts),
             Error = get_error(RequestResId, ResourceData),
             {ok, {QM, Error}};
         {error, not_found} ->
             {error, not_found}
     end.
 
-get_query_mode(_ResourceData, #{query_mode := QM}) ->
-    QM;
-get_query_mode(#{query_mode := QM}, _Opts) ->
-    QM.
+-spec get_query_mode(resource_id(), resource_data(), query_opts()) ->
+    emqx_resource:resource_query_mode().
+get_query_mode(RequestResId, ResourceData, QueryOpts) ->
+    ResourceQueryMode =
+        case ResourceData of
+            #{added_channels := #{RequestResId := #{query_mode := QM}}} ->
+                QM;
+            #{query_mode := QM} ->
+                QM
+        end,
+    RequestedQueryKind =
+        case maps:find(query_mode, QueryOpts) of
+            error -> undefined;
+            {ok, async} -> async;
+            {ok, sync} -> sync;
+            {ok, Kind} -> error({bad_query_kind, Kind})
+        end,
+    HasInternalBuffer =
+        case ResourceQueryMode of
+            simple_sync_internal_buffer ->
+                true;
+            simple_async_internal_buffer ->
+                true;
+            _ ->
+                false
+        end,
+    IsSimple =
+        case ResourceQueryMode of
+            simple_sync ->
+                true;
+            simple_async ->
+                true;
+            _ ->
+                false
+        end,
+    case {RequestedQueryKind, ResourceQueryMode} of
+        {undefined, _} ->
+            ResourceQueryMode;
+        {async, _} when HasInternalBuffer ->
+            simple_async_internal_buffer;
+        {sync, _} when HasInternalBuffer ->
+            simple_sync_internal_buffer;
+        {async, _} when IsSimple ->
+            simple_async;
+        {sync, _} when IsSimple ->
+            simple_sync;
+        {_, _} ->
+            RequestedQueryKind
+    end.
 
+get_error(_ResId, #{error := {unhealthy_target, _} = Error} = _ResourceData) ->
+    Error;
 get_error(ResId, #{added_channels := #{} = Channels} = ResourceData) when
     is_map_key(ResId, Channels)
 ->
@@ -816,6 +876,7 @@ start_resource(Data, From) ->
     case emqx_resource:call_start(ResId, Mod, Config) of
         {ok, ResourceState} ->
             UpdatedData1 = Data#data{status = ?status_connecting, state = ResourceState},
+            ensure_channel_metrics_exist(UpdatedData1),
             %% Perform an initial health_check immediately before transitioning into a connected state
             UpdatedData2 = add_channels(UpdatedData1),
             UpdatedData3 = maybe_update_callback_mode(UpdatedData2),
@@ -834,6 +895,7 @@ start_resource(Data, From) ->
             ),
             _ = maybe_alarm(?status_disconnected, IsDryRun, ResId, Err, Data#data.error),
             %% Add channels and raise alarms
+            ensure_channel_metrics_exist(Data),
             {Actions0, NewData1} = channels_health_check(?status_disconnected, add_channels(Data)),
             %% Keep track of the error reason why the connection did not work
             %% so that the Reason can be returned when the verification call is made.
@@ -1298,8 +1360,9 @@ handle_manual_channel_health_check(
     is_map_key(ChannelId, Channels)
 ->
     %% No ongoing health check: reply with current status.
+    StatusMap = maps:get(ChannelId, Channels),
     {keep_state_and_data, [
-        {reply, From, to_external_channel_status(maps:get(ChannelId, Channels))}
+        {reply, From, to_external_channel_status(StatusMap)}
     ]};
 handle_manual_channel_health_check(
     From,
@@ -1714,9 +1777,21 @@ maybe_alarm(_Status, false, ResId, Error, _PrevError) ->
 without_channel_config(Map) ->
     maps:without([config], Map).
 
+-spec to_external_channel_status(channel_status_map() | cache_channel_status_map()) ->
+    external_channel_status_map().
 to_external_channel_status(StatusMap0) ->
     StatusMap = without_channel_config(StatusMap0),
     maps:update_with(error, fun external_error/1, StatusMap).
+
+%% Contains more data than the external channel status that we want to cache.  It's fine
+%% to also return it when looking up the whole resource, but we don't want to return this
+%% extra info when reporting the status of an individual channel.
+-spec to_cache_channel_status(channel_status_map(), module()) -> cache_channel_status_map().
+to_cache_channel_status(StatusMap0, ResourceMod) ->
+    #{config := ChannelConfig} = StatusMap0,
+    StatusMap = to_external_channel_status(StatusMap0),
+    QueryMode = emqx_resource:query_mode(ResourceMod, ChannelConfig),
+    StatusMap#{query_mode => QueryMode}.
 
 -spec maybe_resume_resource_workers(resource_id(), resource_status()) -> ok.
 maybe_resume_resource_workers(ResId, ?status_connected) ->
@@ -1768,10 +1843,10 @@ maybe_reply(Actions, From, Reply) ->
 
 -spec data_record_to_external_map(data()) -> resource_data().
 data_record_to_external_map(Data) ->
-    AddedChannelsWithoutConfigs =
+    AddedChannels =
         maps:map(
             fun(_ChanID, Status) ->
-                to_external_channel_status(Status)
+                to_cache_channel_status(Status, Data#data.mod)
             end,
             Data#data.added_channels
         ),
@@ -1784,7 +1859,7 @@ data_record_to_external_map(Data) ->
         config => Data#data.config,
         status => Data#data.status,
         state => Data#data.state,
-        added_channels => AddedChannelsWithoutConfigs
+        added_channels => AddedChannels
     }.
 
 -spec wait_for_ready(resource_id(), integer()) -> ok | timeout | {error, term()}.
@@ -2025,3 +2100,15 @@ abort_health_checks_for_channel(Data0, ChannelId) ->
         hc_workers = HCWorkers,
         hc_pending_callers = Pending
     }.
+
+%% When booting up the node, there may be actions/sources in the config that were not
+%% explicitly created yet.  Since we add the channels in the config while first starting
+%% the resource, such channels might immediatelly receive traffic (e.g. ingress MQTT
+%% bridge).  Thus we need to ensure the metrics exist.
+ensure_channel_metrics_exist(Data) ->
+    lists:foreach(
+        fun({ChannelId, _Config}) ->
+            {ok, _} = emqx_resource:ensure_metrics(ChannelId)
+        end,
+        emqx_resource:call_get_channels(Data#data.id, Data#data.mod)
+    ).
