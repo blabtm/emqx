@@ -347,3 +347,7 @@ spellcheck:
 .PHONY: nothing
 nothing:
 	@:
+
+proxy:
+	docker build -t ghcr.io/blabtm/emqx-proxy:latest -f deploy/docker/proxy.Dockerfile .
+	docker push ghcr.io/blabtm/emqx-proxy:latest
