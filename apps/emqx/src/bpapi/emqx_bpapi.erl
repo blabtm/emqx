@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
     start/0,
     announce/2,
     supported_version/1, supported_version/2,
+    supported_apis/1,
     versions_file/1
 ]).
 
@@ -82,6 +83,15 @@ supported_version(Node, API) ->
 -spec supported_version(api()) -> api_version().
 supported_version(API) ->
     ets:lookup_element(?TAB, {?multicall, API}, #?TAB.version).
+
+-spec supported_apis(node()) -> [{api(), api_version()}].
+supported_apis(Node) ->
+    try
+        lists:flatten(ets:match(?TAB, {?TAB, {Node, '$1'}, '$2'}))
+    catch
+        error:badarg ->
+            []
+    end.
 
 -spec announce(node(), atom()) -> ok.
 announce(Node, App) ->

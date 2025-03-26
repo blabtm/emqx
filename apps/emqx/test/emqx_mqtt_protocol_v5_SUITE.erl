@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -24,6 +24,11 @@
 -include_lib("emqx/include/asserts.hrl").
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
 -include_lib("common_test/include/ct.hrl").
+
+-ifndef(BUILD_WITHOUT_QUIC).
+%% Please our CI
+-include_lib("quicer/include/quicer.hrl").
+-endif.
 
 -import(lists, [nth/2]).
 
@@ -55,8 +60,8 @@ all() ->
 groups() ->
     TCs = emqx_common_test_helpers:all(?MODULE),
     [
-        {tcp, [], TCs},
-        {ws, [], TCs},
+        {tcp, [], TCs -- [t_connect_clean_start_unresp_old_client]},
+        {ws, [], TCs -- [t_connect_clean_start_unresp_old_client]},
         {quic, [], TCs}
     ].
 
@@ -208,6 +213,45 @@ t_connect_clean_start(Config) ->
     waiting_client_process_exit(Client3),
 
     process_flag(trap_exit, false).
+
+-ifndef(BUILD_WITHOUT_QUIC).
+t_connect_clean_start_unresp_old_client(Config) ->
+    ConnFun = ?config(conn_fun, Config),
+    ClientID = atom_to_binary(?FUNCTION_NAME),
+    process_flag(trap_exit, true),
+    %% GIVEN: a client with clean_start=true
+    {ok, Client1} = emqtt:start_link([
+        {clientid, ClientID},
+        {proto_ver, v5},
+        {clean_start, true}
+        | Config
+    ]),
+    {ok, _} = emqtt:ConnFun(Client1),
+    %% [MQTT-3.1.2-4]
+    ?assertEqual(0, client_info(session_present, Client1)),
+    {ok, Client2} = emqtt:start_link([
+        {clientid, ClientID},
+        {proto_ver, v5},
+        {clean_start, false},
+        %% ensure fast close < 10ms
+        {connect_timeout, 10}
+        | Config
+    ]),
+    %% WHEN: the client became unresponsive
+    close_quic_conn_silently(ConnFun, Client1),
+    %% THEN: the new client should connect successfully in time < connect_timeout
+    {ok, _} = emqtt:ConnFun(Client2),
+    ok = emqtt:disconnect(Client2),
+    ?assertReceive({'EXIT', Client1, _}),
+    ?assertReceive({'EXIT', Client2, _}),
+    ok.
+
+close_quic_conn_silently(quic_connect, Client) ->
+    %% simulate a unresponsive client that server doesn't know it is disconnected
+    {quic, Conn, _Stream} = proplists:get_value(socket, emqtt:info(Client)),
+    _ = quicer:shutdown_connection(Conn, ?QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, 0, 10),
+    ok.
+-endif.
 
 t_connect_will_message(Config) ->
     ConnFun = ?config(conn_fun, Config),
@@ -383,11 +427,12 @@ t_connect_idle_timeout(Config) ->
     emqx_config:put_zone_conf(default, [mqtt, idle_timeout], IdleTimeout),
     SockOpts = [binary, {active, true}, {nodelay, true}],
     {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, 1883, SockOpts, 5000),
+    ClientSockname = esockd:format(element(2, inet:sockname(Sock))),
     ok = gen_tcp:send(Sock, binary:part(iolist_to_binary(ConnectPacket), 0, 4)),
     ?assertReceive({tcp_closed, Sock}, IdleTimeout * 2),
     ?assertMatch(
-        {ok, #{reason := {shutdown, idle_timeout}}},
-        ?block_until(#{?snk_kind := terminate}, IdleTimeout)
+        {ok, #{reason := {shutdown, idle_timeout}, ?snk_meta := #{peername := ClientSockname}}},
+        ?block_until(#{?snk_kind := terminate, reason := {shutdown, idle_timeout}}, IdleTimeout)
     ).
 
 t_connect_emit_stats_timeout(init, Config) ->

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -286,6 +286,8 @@ resolve_func_name(FuncNameStr) ->
 %% _Opts can be extended in the future. For example, unbound var as 'undfeined'
 resolve_var_value(VarName, Bindings, _Opts) ->
     case emqx_template:lookup_var(split(VarName), Bindings) of
+        {ok, Value} when ?IS_EMPTY(Value) ->
+            <<"">>;
         {ok, Value} ->
             Value;
         {error, _Reason} ->

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -22,14 +22,17 @@
 
 -export_type([source/0]).
 
--type source() :: {file, file:filename_all()}.
+-type source() :: {file, string() | binary()}.
 
 -spec load(source()) -> binary() | no_return().
-load({file, Filename}) ->
-    file(Filename).
+load({file, <<"file://", Path/binary>>}) ->
+    file(Path);
+load({file, "file://" ++ Path}) ->
+    file(Path).
 
 -spec file(file:filename_all()) -> binary() | no_return().
-file(Filename) ->
+file(Filename0) ->
+    Filename = emqx_schema:naive_env_interpolation(Filename0),
     case file:read_file(Filename) of
         {ok, Secret} ->
             string:trim(Secret, trailing);

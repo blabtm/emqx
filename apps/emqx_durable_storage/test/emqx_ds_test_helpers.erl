@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -239,7 +239,7 @@ transitions(Node, DB) ->
 %% Try to eliminate any ambiguity in the message representation.
 message_canonical_form(Msg0 = #message{}) ->
     message_canonical_form(emqx_message:to_map(Msg0));
-message_canonical_form(#{flags := Flags0, headers := Headers0, payload := Payload0} = Msg) ->
+message_canonical_form(#{flags := Flags0, headers := _Headers0, payload := Payload0} = Msg) ->
     %% Remove flags that are false:
     Flags = maps:filter(
         fun(_Key, Val) -> Val end,

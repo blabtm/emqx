@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_cluster_link_app).
@@ -31,7 +31,7 @@ prep_stop(State) ->
 stop(_State) ->
     _ = emqx_cluster_link:delete_hook(),
     _ = emqx_cluster_link:unregister_external_broker(),
-    _ = remove_msg_fwd_resources(emqx_cluster_link_config:links()),
+    _ = remove_msg_fwd_resources(emqx_cluster_link_config:get_links()),
     ok.
 
 %%--------------------------------------------------------------------

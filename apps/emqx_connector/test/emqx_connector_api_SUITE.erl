@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -108,8 +108,13 @@
 -define(KAFKA_BRIDGE(Name), ?KAFKA_BRIDGE(Name, ?CONNECTOR_NAME)).
 
 -define(APPSPECS, [
+    {emqx, #{
+        before_start => fun(App, AppConfig) ->
+            ok = emqx_schema_hooks:inject_from_modules([?MODULE]),
+            emqx_cth_suite:inhibit_config_loader(App, AppConfig)
+        end
+    }},
     emqx_conf,
-    emqx,
     emqx_auth,
     emqx_connector,
     emqx_bridge,
@@ -139,7 +144,9 @@ groups() ->
     SingleOnlyTests = [
         t_connectors_probe,
         t_fail_delete_with_action,
-        t_actions_field
+        t_actions_field,
+        t_update_with_failed_validation,
+        t_create_with_failed_root_validation
     ],
     ClusterOnlyTests = [
         t_inconsistent_state
@@ -249,7 +256,7 @@ init_mocks(_TestCase) ->
             (_, bad_connector_state) ->
                 connecting;
             (_, worst_connector_state) ->
-                {?status_disconnected, worst_connector_state, [
+                {?status_disconnected, [
                     #{
                         host => <<"nope:9092">>,
                         reason => unresolvable_hostname
@@ -284,6 +291,26 @@ clear_resources(_) ->
         end,
         emqx_connector:list()
     ).
+
+%% `emqx_schema_hooks' callback
+injected_fields() ->
+    #{
+        'connectors.validators' => [fun ?MODULE:dummy_validator/1]
+    }.
+
+dummy_validator(RootRawConf) ->
+    case persistent_term:get({?MODULE, validator}, undefined) of
+        Fn when is_function(Fn, 1) ->
+            Fn(RootRawConf);
+        _ ->
+            ok
+    end.
+
+set_validator(Fn) when is_function(Fn, 1) ->
+    persistent_term:put({?MODULE, validator}, Fn).
+
+clear_validator() ->
+    persistent_term:erase({?MODULE, validator}).
 
 %%------------------------------------------------------------------------------
 %% Testcases
@@ -971,6 +998,80 @@ t_inconsistent_state(Config) ->
         )
     ),
 
+    ok.
+
+%% Checks that we return a readable error when we attempt to update a connector and its
+%% validation fails.
+t_update_with_failed_validation(Config) ->
+    Params = ?KAFKA_CONNECTOR(?CONNECTOR_NAME),
+    ?assertMatch(
+        {ok, 201, _},
+        request_json(
+            post,
+            uri(["connectors"]),
+            Params,
+            Config
+        )
+    ),
+    BadParams0 = emqx_utils_maps:deep_merge(
+        Params,
+        #{<<"bootstrap_hosts">> => <<"a:b:123:a">>}
+    ),
+    BadParams = maps:without([<<"type">>, <<"name">>], BadParams0),
+    ConnectorID = emqx_connector_resource:connector_id(?CONNECTOR_TYPE, ?CONNECTOR_NAME),
+    %% Has to be a validator that returns `{error, _}' instead of throwing stuff.
+    on_exit(fun() -> meck:unload() end),
+    ok = meck:new(emqx_schema, [passthrough]),
+    MockedError = <<"mocked negative validator response">>,
+    ok = meck:expect(emqx_schema, servers_validator, fun(_, _) ->
+        fun(_) ->
+            {error, MockedError}
+        end
+    end),
+    {ok, 400, ResBin} = request(
+        put,
+        uri(["connectors", ConnectorID]),
+        BadParams,
+        Config
+    ),
+    #{<<"message">> := MessageBin} = emqx_utils_json:decode(ResBin),
+    ct:pal("error message:\n  ~s", [MessageBin]),
+    Message = emqx_utils_json:decode(MessageBin),
+    ?assertMatch(
+        #{
+            <<"kind">> := <<"validation_error">>,
+            <<"reason">> := MockedError
+        },
+        Message
+    ),
+    ok.
+
+%% Checks that we return a readable error when we attempt to create a connector and a
+%% global, root validation fails.
+t_create_with_failed_root_validation(Config) ->
+    on_exit(fun clear_validator/0),
+    ErrorMsg = <<"mocked root error">>,
+    set_validator(fun(_RootConf) -> {error, ErrorMsg} end),
+    Params = ?KAFKA_CONNECTOR(?CONNECTOR_NAME),
+    {ok, 400, #{<<"message">> := MsgBin}} =
+        request_json(
+            post,
+            uri(["connectors"]),
+            Params,
+            Config
+        ),
+    Message = emqx_utils_json:decode(MsgBin),
+    %% `value' shouldn't contain the whole connectors map, as it may be huge.  We focus on
+    %% the config that was part of the request.
+    ?assertMatch(
+        #{
+            <<"reason">> := ErrorMsg,
+            <<"kind">> := <<"validation_error">>,
+            <<"path">> := <<"connectors">>,
+            <<"value">> := #{<<"bootstrap_hosts">> := _}
+        },
+        Message
+    ),
     ok.
 
 %%% helpers

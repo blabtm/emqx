@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -122,6 +122,7 @@ enrich_report(ReportRaw0, Meta, Config) ->
             undefined -> maps:get(username, ReportRaw, undefined);
             Username0 -> Username0
         end,
+    Tns = maps:get(tns, Meta, undefined),
     ClientId = maps:get(clientid, Meta, undefined),
     Peer = maps:get(peername, Meta, undefined),
     Msg = maps:get(msg, ReportRaw, undefined),
@@ -135,7 +136,7 @@ enrich_report(ReportRaw0, Meta, Config) ->
             ({_, undefined}, Acc) -> Acc;
             (Item, Acc) -> [Item | Acc]
         end,
-        maps:to_list(maps:without([topic, msg, clientid, username, tag], ReportRaw)),
+        maps:to_list(maps:without([topic, msg, tns, clientid, username, tag], ReportRaw)),
         [
             {topic, try_format_unicode(Topic)},
             {username, try_format_unicode(Username)},
@@ -143,6 +144,7 @@ enrich_report(ReportRaw0, Meta, Config) ->
             {mfa, try_format_unicode(MFA)},
             {msg, Msg},
             {clientid, try_format_unicode(ClientId)},
+            {tns, try_format_unicode(Tns)},
             {tag, Tag}
         ]
     ).

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 -module(emqx_otel_sampler).
 
@@ -162,11 +162,9 @@ setup(#{sample_ratio := Ratio} = InitOpts) ->
 
     Opts.
 
-%% TODO: description
 description(_Opts) ->
     <<"AttributeSampler">>.
 
-%% TODO: remote sampled
 should_sample(
     Ctx,
     TraceId,
@@ -186,7 +184,34 @@ should_sample(
         SpanName =:= ?BROKER_UNSUBSCRIBE_SPAN_NAME
 ->
     Desicion =
-        decide_by_match_rule(Attributes, Opts) orelse
+        %% 1st: is remote span and sampled by remote?
+        remote_sampled(otel_tracer:current_span_ctx(Ctx)) orelse
+            %% 2nd: whitelist
+            decide_by_match_rule(Attributes, Opts) orelse
+            %% 3rd: decide by traceid ratio
+            decide_by_traceid_ratio(TraceId, SpanName, Opts),
+    {
+        decide(Desicion),
+        with_cluster_id(Opts),
+        otel_span:tracestate(otel_tracer:current_span_ctx(Ctx))
+    };
+%% Msg deliver to Subscriber
+%% The publisher is not in the whitelist, but the subscriber is, sampling is still required
+should_sample(
+    Ctx,
+    TraceId,
+    _Links,
+    ?BROKER_PUBLISH_SPAN_NAME = SpanName,
+    _SpanKind,
+    Attributes,
+    Opts
+) ->
+    Desicion =
+        %% sampled by parent span
+        parent_sampled(otel_tracer:current_span_ctx(Ctx)) orelse
+            %% matched whitelist rule
+            decide_by_match_rule(Attributes, Opts) orelse
+            %% then decide by traceid ratio
             decide_by_traceid_ratio(TraceId, SpanName, Opts),
     {
         decide(Desicion),
@@ -230,33 +255,42 @@ decide_by_match_rule(Attributes, _) ->
         %% FIXME: external topic filters for AUTHZ
         by_topic(Attributes).
 
-decide_by_traceid_ratio(_, _, #{id_upper := ?MAX_VALUE}) ->
-    true;
-decide_by_traceid_ratio(TraceId, SpanName, #{id_upper := IdUpperBound} = Opts) ->
-    case maps:get(span_name_to_config_key(SpanName), Opts, false) of
-        true ->
-            Lower64Bits = TraceId band ?MAX_VALUE,
-            Lower64Bits =< IdUpperBound;
-        _ ->
-            %% not configured, always dropped.
-            false
-    end.
+decide_by_traceid_ratio(TraceId, SpanName, Opts) ->
+    do_decide_by_traceid_ratio(
+        TraceId,
+        event_enabled(SpanName, Opts),
+        Opts
+    ).
 
-span_name_to_config_key(SpanName) when
+-spec event_enabled(atom(), map()) -> boolean().
+event_enabled(SpanName, #{client_connect_disconnect := Boolean}) when
     SpanName =:= ?CLIENT_CONNECT_SPAN_NAME orelse
         SpanName =:= ?CLIENT_DISCONNECT_SPAN_NAME orelse
         SpanName =:= ?BROKER_DISCONNECT_SPAN_NAME
 ->
-    client_connect_disconnect;
-span_name_to_config_key(SpanName) when
+    Boolean;
+event_enabled(SpanName, #{client_subscribe_unsubscribe := Boolean}) when
     SpanName =:= ?CLIENT_SUBSCRIBE_SPAN_NAME orelse
         SpanName =:= ?CLIENT_UNSUBSCRIBE_SPAN_NAME orelse
         SpanName =:= ?BROKER_SUBSCRIBE_SPAN_NAME orelse
         SpanName =:= ?BROKER_UNSUBSCRIBE_SPAN_NAME
 ->
-    client_subscribe_unsubscribe;
-span_name_to_config_key(?CLIENT_PUBLISH_SPAN_NAME) ->
-    client_messaging.
+    Boolean;
+event_enabled(SpanName, #{client_messaging := Boolean}) when
+    SpanName =:= ?CLIENT_PUBLISH_SPAN_NAME orelse
+        SpanName =:= ?BROKER_PUBLISH_SPAN_NAME
+->
+    Boolean.
+
+do_decide_by_traceid_ratio(_, false, _) ->
+    %% not configured, dropped.
+    false;
+do_decide_by_traceid_ratio(_, true, #{id_upper := ?MAX_VALUE} = _Opts) ->
+    %% enabled and ratio=100%, skip id sample ratio calculation
+    true;
+do_decide_by_traceid_ratio(TraceId, true, #{id_upper := IdUpperBound} = _Opts) ->
+    Lower64Bits = TraceId band ?MAX_VALUE,
+    Lower64Bits =< IdUpperBound.
 
 by_clientid(#{'client.clientid' := ClientId}) ->
     read_should_sample({?EMQX_OTEL_SAMPLE_CLIENTID, ClientId});
@@ -296,7 +330,15 @@ read_should_sample(Key) ->
 match_topic_filter(AttrTopic, #?EMQX_OTEL_SAMPLER{type = {?EMQX_OTEL_SAMPLE_TOPIC, Topic}}) ->
     emqx_topic:match(AttrTopic, Topic).
 
--compile({inline, [parent_sampled/1]}).
+-compile({inline, [remote_sampled/1, parent_sampled/1]}).
+
+remote_sampled(#span_ctx{is_remote = true, trace_flags = TraceFlags}) when
+    ?IS_SAMPLED(TraceFlags)
+->
+    true;
+remote_sampled(_) ->
+    false.
+
 parent_sampled(#span_ctx{trace_flags = TraceFlags}) when
     ?IS_SAMPLED(TraceFlags)
 ->

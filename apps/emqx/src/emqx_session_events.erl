@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -48,10 +48,10 @@ handle_event(ClientInfo, {dropped, Msg, #{reason := qos0_msg, logctx := Ctx}}) -
     ok = emqx_metrics:inc('delivery.dropped'),
     ok = emqx_metrics:inc('delivery.dropped.qos0_msg'),
     ok = inc_pd('send_msg.dropped', 1),
-    ?SLOG(
+    ?SLOG_THROTTLE(
         warning,
         Ctx#{
-            msg => "dropped_qos0_msg",
+            msg => dropped_qos0_msg,
             payload => Msg#message.payload
         },
         #{topic => Msg#message.topic}

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 -module(emqx_ldap_bind_worker).
 
+-include_lib("emqx_resource/include/emqx_resource.hrl").
 -include_lib("typerefl/include/types.hrl").
 -include_lib("emqx/include/logger.hrl").
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
@@ -107,7 +108,7 @@ on_query(
 on_get_status(_InstId, #{bind_pool_name := PoolName}) ->
     emqx_ldap:get_status_with_poolname(PoolName);
 on_get_status(_InstId, _) ->
-    connected.
+    ?status_connected.
 
 %% ===================================================================
 

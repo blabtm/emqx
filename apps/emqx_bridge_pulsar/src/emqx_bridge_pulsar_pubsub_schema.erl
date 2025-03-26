@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 -module(emqx_bridge_pulsar_pubsub_schema).
 
@@ -46,6 +46,10 @@ fields(action_parameters) ->
         {sync_timeout,
             ?HOCON(emqx_schema:timeout_duration_ms(), #{
                 default => <<"3s">>, desc => ?DESC("producer_sync_timeout")
+            })},
+        {max_inflight,
+            ?HOCON(pos_integer(), #{
+                default => 10, desc => ?DESC("producer_max_inflight")
             })}
     ] ++ emqx_bridge_pulsar:fields(producer_opts);
 fields(producer_pulsar_message) ->

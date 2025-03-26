@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -270,7 +270,8 @@ get_param_types(Signatures, From, {M, F, A}) ->
 
 dump() ->
     RootDir = project_root_dir(),
-    TryRelDir = RootDir ++ "/_build/check/lib",
+    BuildProfile = os:getenv("BPAPI_BUILD_PROFILE", "check"),
+    TryRelDir = filename:join([RootDir, "_build", BuildProfile, "lib"]),
     case {filelib:wildcard(RootDir ++ "/*_plt"), filelib:wildcard(TryRelDir)} of
         {[PLT | _], [RelDir | _]} ->
             dump(#{

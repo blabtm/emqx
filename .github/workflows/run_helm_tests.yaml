@@ -34,7 +34,7 @@ jobs:
         - ssl1.3
         - ssl1.2
     steps:
-    - uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938 # v4.2.0
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
         path: source
     - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
@@ -138,7 +138,7 @@ jobs:
         done
     - name: Setup 18083 port forwarding
       run: |
-        nohup kubectl port-forward service/${EMQX_NAME} 18083:18083 > /dev/null &
+        nohup bash -c "while true; do kubectl port-forward service/${EMQX_NAME} 18083:18083 ; sleep 1 ; done" &
     - name: Get auth token
       run: |
         curl --head -X GET --retry 10 --retry-connrefused --retry-delay 6 http://localhost:18083/status
@@ -158,7 +158,7 @@ jobs:
           fi
           sleep 1;
         done
-    - uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938 # v4.2.0
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
         repository: emqx/paho.mqtt.testing
         ref: develop-5.0

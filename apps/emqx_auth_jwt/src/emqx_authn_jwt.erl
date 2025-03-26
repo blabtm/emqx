@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -40,8 +40,12 @@
 create(_AuthenticatorID, Config) ->
     create(Config).
 
-create(#{verify_claims := VerifyClaims} = Config) ->
-    do_create(Config#{verify_claims => handle_verify_claims(VerifyClaims)}).
+create(#{algorithm := 'hmac-based', use_jwks := false} = Config) ->
+    create_authn_hmac_based(Config);
+create(#{algorithm := 'public-key', use_jwks := false} = Config) ->
+    create_authn_public_key(Config);
+create(#{use_jwks := true} = Config) ->
+    create_authn_public_key_with_jwks(Config).
 
 update(
     #{use_jwks := false} = Config,
@@ -53,22 +57,18 @@ update(#{use_jwks := false} = Config, _State) ->
     create(Config);
 update(
     #{use_jwks := true} = Config,
-    #{jwk_resource := ResourceId} = State
+    #{jwk_resource := ResourceId}
 ) ->
     case emqx_resource:simple_sync_query(ResourceId, {update, connector_opts(Config)}) of
         ok ->
-            case maps:get(verify_claims, Config, undefined) of
-                undefined ->
-                    {ok, State};
-                VerifyClaims ->
-                    {ok, State#{verify_claims => handle_verify_claims(VerifyClaims)}}
-            end;
+            create_authn_public_key_with_jwks(Config, ResourceId);
         {error, Reason} ->
             ?SLOG(error, #{
                 msg => "jwks_client_option_update_failed",
                 resource => ResourceId,
                 reason => Reason
-            })
+            }),
+            {error, Reason}
     end;
 update(#{use_jwks := true} = Config, _State) ->
     create(Config).
@@ -123,9 +123,7 @@ destroy(_) ->
 %% Internal functions
 %%--------------------------------------------------------------------
 
-do_create(#{
-    use_jwks := false,
-    algorithm := 'hmac-based',
+create_authn_hmac_based(#{
     secret := Secret0,
     secret_base64_encoded := Base64Encoded,
     verify_claims := VerifyClaims,
@@ -140,16 +138,15 @@ do_create(#{
             JWK = jose_jwk:from_oct(Secret),
             {ok, #{
                 jwk => JWK,
-                verify_claims => VerifyClaims,
+                verify_claims => handle_verify_claims(VerifyClaims),
                 disconnect_after_expire => DisconnectAfterExpire,
                 acl_claim_name => AclClaimName,
                 from => From
             }}
-    end;
-do_create(
+    end.
+
+create_authn_public_key(
     #{
-        use_jwks := false,
-        algorithm := 'public-key',
         public_key := PublicKey,
         verify_claims := VerifyClaims,
         disconnect_after_expire := DisconnectAfterExpire,
@@ -166,23 +163,16 @@ do_create(
         {ok, JWK} ->
             {ok, #{
                 jwk => JWK,
-                verify_claims => VerifyClaims,
+                verify_claims => handle_verify_claims(VerifyClaims),
                 disconnect_after_expire => DisconnectAfterExpire,
                 acl_claim_name => AclClaimName,
                 from => From
             }};
         {error, _Reason} = Err ->
             Err
-    end;
-do_create(
-    #{
-        use_jwks := true,
-        verify_claims := VerifyClaims,
-        disconnect_after_expire := DisconnectAfterExpire,
-        acl_claim_name := AclClaimName,
-        from := From
-    } = Config
-) ->
+    end.
+
+create_authn_public_key_with_jwks(Config) ->
     ResourceId = emqx_authn_utils:make_resource_id(?MODULE),
     {ok, _Data} = emqx_resource:create_local(
         ResourceId,
@@ -191,9 +181,20 @@ do_create(
         connector_opts(Config),
         #{}
     ),
+    create_authn_public_key_with_jwks(Config, ResourceId).
+
+create_authn_public_key_with_jwks(
+    #{
+        verify_claims := VerifyClaims,
+        disconnect_after_expire := DisconnectAfterExpire,
+        acl_claim_name := AclClaimName,
+        from := From
+    },
+    ResourceId
+) ->
     {ok, #{
         jwk_resource => ResourceId,
-        verify_claims => VerifyClaims,
+        verify_claims => handle_verify_claims(VerifyClaims),
         disconnect_after_expire => DisconnectAfterExpire,
         acl_claim_name => AclClaimName,
         from => From
@@ -223,13 +224,8 @@ do_create_jwk_from_public_key(PublicKey) ->
             jose_jwk:from_pem(iolist_to_binary(PublicKey))
     end.
 
-connector_opts(#{ssl := #{enable := Enable} = SSL} = Config) ->
-    SSLOpts =
-        case Enable of
-            true -> maps:without([enable], SSL);
-            false -> #{}
-        end,
-    Config#{ssl_opts => SSLOpts}.
+connector_opts(Config) ->
+    Config.
 
 may_decode_secret(false, Secret) ->
     Secret;

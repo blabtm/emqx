@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -882,7 +882,7 @@ examples_update_gateway_confs() ->
                         enable_stats => true,
                         idle_timeout => <<"30s">>,
                         mountpoint => <<"lwm2m2/">>,
-                        xml_dir => <<"/etc/emqx/lwm2m_xml">>,
+                        xml_dir => <<"etc/lwm2m_xml">>,
                         lifetime_min => <<"1s">>,
                         lifetime_max => <<"86400s">>,
                         qmode_time_window => <<"22s">>,
@@ -911,6 +911,30 @@ examples_update_gateway_confs() ->
                             #{bind => <<"9100">>},
                         handler =>
                             #{address => <<"http://127.0.0.1:9001">>}
+                    }
+            },
+        jt808_gateway =>
+            #{
+                summary => <<"A simple JT808 gateway config">>,
+                value =>
+                    #{
+                        enable => true,
+                        enable_stats => true,
+                        mountpoint => <<"">>,
+                        idle_timeout => <<"30s">>,
+                        retry_interval => <<"8s">>,
+                        max_retry_times => 3,
+                        message_queue_len => 10,
+                        frame => #{
+                            max_length => 65535
+                        },
+                        proto => #{
+                            auth => #{
+                                allow_anonymous => true
+                            },
+                            up_topic => <<"jt808/up/${clientid}/up">>,
+                            dn_topic => <<"jt808/dn/${clientid}/dn">>
+                        }
                     }
             },
         gbt32960_gateway =>

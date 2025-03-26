@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_bridge_syskeeper_proxy_server).
@@ -7,6 +7,7 @@
 -behaviour(gen_statem).
 
 -include_lib("emqx/include/logger.hrl").
+-include_lib("emqx_resource/include/emqx_resource.hrl").
 
 -elvis([{elvis_style, invalid_dynamic_call, disable}]).
 
@@ -105,10 +106,10 @@ on_stop(InstanceId, _State) ->
 on_get_status(_InstanceId, #{listen_on := ListenOn}) ->
     try
         _ = esockd:listener({?MODULE, ListenOn}),
-        connected
+        ?status_connected
     catch
         _:_ ->
-            disconnected
+            ?status_disconnected
     end.
 
 %% -------------------------------------------------------------------------------------------------

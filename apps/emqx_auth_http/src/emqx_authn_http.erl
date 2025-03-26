@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -169,7 +169,7 @@ parse_config(
     State = #{
         method => Method,
         path => Path,
-        headers => maps:to_list(Headers),
+        headers => emqx_authn_utils:parse_deep(maps:to_list(Headers)),
         base_path_template => emqx_authn_utils:parse_str(Path),
         base_query_template => emqx_authn_utils:parse_deep(
             cow_qs:parse_qs(Query)

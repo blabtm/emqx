@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_bridge_azure_event_hub_tests).
@@ -102,7 +102,7 @@ check(Conf) when is_map(Conf) ->
 
 aeh_producer_test_() ->
     %% ensure this module is loaded when testing only this file
-    _ = emqx_bridge_enterprise:module_info(),
+    _ = emqx_utils:interactive_load(emqx_bridge_enterprise),
     BaseConf = parse(aeh_producer_hocon()),
     Override = fun(Cfg) ->
         emqx_utils_maps:deep_merge(

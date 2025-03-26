@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -31,6 +31,11 @@ render_test_() ->
         end},
         {"direct var reference undefined", fun() ->
             ?assertEqual({ok, <<"">>}, render("a", #{a => undefined}))
+        end},
+        {"var reference undefined", fun() ->
+            ?assertEqual(
+                {ok, <<"/c1">>}, render("concat([a, '/', c])", #{a => undefined, c => <<"c1">>})
+            )
         end},
         {"direct var reference null", fun() ->
             ?assertEqual({ok, <<"">>}, render("a", #{a => null}))

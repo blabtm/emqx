@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -65,8 +65,8 @@ t_event_name_topic_conversion(_) ->
     Zip = lists:zip(Events, Topics),
     lists:foreach(
         fun({Event, Topic}) ->
-            ?assertEqual(Event, emqx_rule_events:event_name(Topic)),
-            ?assertEqual(Topic, emqx_rule_events:event_topic(Event))
+            ?assertEqual(Event, emqx_rule_events:event_name(Topic), #{topic => Topic}),
+            ?assertEqual(Topic, emqx_rule_events:event_topic(Event), #{event => Event})
         end,
         Zip
     ).

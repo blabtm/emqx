@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2018-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2018-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -49,6 +49,7 @@
     sockstate/0,
     conninfo/0,
     clientinfo/0,
+    tns/0,
     clientid/0,
     username/0,
     password/0,
@@ -152,7 +153,7 @@
 -type share() :: #share{}.
 
 -type socktype() :: tcp | udp | ssl | proxy | atom().
--type sockstate() :: idle | running | blocked | closed.
+-type sockstate() :: idle | running | blocked | closed | read_aborted.
 -type conninfo() :: #{
     socktype := socktype(),
     sockname := peername(),
@@ -195,6 +196,7 @@
     atom() => term()
 }.
 -type client_attrs() :: #{binary() => binary()}.
+-type tns() :: binary().
 -type clientid() :: binary() | atom().
 -type username() :: option(binary()).
 -type password() :: option(binary()).

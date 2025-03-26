@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 -module(emqx_bridge_kafka).
 
@@ -529,7 +529,7 @@ fields(producer_buffer) ->
         {per_partition_limit,
             mk(
                 emqx_schema:bytesize(),
-                #{default => <<"2GB">>, desc => ?DESC(buffer_per_partition_limit)}
+                #{default => <<"256MB">>, desc => ?DESC(buffer_per_partition_limit)}
             )},
         {segment_bytes,
             mk(
@@ -538,7 +538,7 @@ fields(producer_buffer) ->
             )},
         {memory_overload_protection,
             mk(boolean(), #{
-                default => false,
+                default => true,
                 desc => ?DESC(buffer_memory_overload_protection)
             })}
     ];

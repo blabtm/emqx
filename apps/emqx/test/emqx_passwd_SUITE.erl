@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -96,6 +96,8 @@ t_hash(_) ->
     ),
     Sha512 = emqx_passwd:hash({sha512, Salt, suffix}, Password),
     true = emqx_passwd:check_pass({sha512, Salt, suffix}, Sha512, Password),
+    %% Case is ignored for comparisons.
+    true = emqx_passwd:check_pass({sha512, Salt, suffix}, string:uppercase(Sha512), Password),
     false = emqx_passwd:check_pass({sha512, Salt, suffix}, Sha512, WrongPassword),
     ?assertEqual(
         emqx_passwd:hash_data(sha512, Password),
@@ -120,6 +122,10 @@ t_hash(_) ->
     >>,
     _Pbkdf2 = emqx_passwd:hash({pbkdf2, sha, Pbkdf2Salt, 2, 32}, Password),
     true = emqx_passwd:check_pass({pbkdf2, sha, Pbkdf2Salt, 2, 32}, Pbkdf2, Password),
+    %% Case is ignored for comparisons.
+    true = emqx_passwd:check_pass(
+        {pbkdf2, sha, Pbkdf2Salt, 2, 32}, string:uppercase(Pbkdf2), Password
+    ),
     false = emqx_passwd:check_pass({pbkdf2, sha, Pbkdf2Salt, 2, 32}, Pbkdf2, WrongPassword),
     ?assertException(
         error, _, emqx_passwd:check_pass({pbkdf2, sha, Pbkdf2Salt, 2, BadDKlen}, Pbkdf2, Password)

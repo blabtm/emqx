@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -857,7 +857,6 @@ pack_test_() ->
     ].
 
 split_test_() ->
-    Always = fun(_It, _Msg) -> true end,
     M1 = {<<"1">>, #message{id = <<"1">>}},
     M2 = {<<"2">>, #message{id = <<"2">>}},
     M3 = {<<"3">>, #message{id = <<"3">>}},

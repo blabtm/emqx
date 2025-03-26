@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2018-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2018-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -96,7 +96,6 @@
 -define(SERVER, ?MODULE).
 
 -define(SHARED_SUB_QOS1_DISPATCH_TIMEOUT_SECONDS, 5).
--define(IS_REMOTE_PID(Pid), (is_pid(Pid) andalso node(Pid) =/= node())).
 -define(ACK, shared_sub_ack).
 -define(NACK(Reason), {shared_sub_nack, Reason}).
 -define(NO_ACK, no_ack).
@@ -473,14 +472,16 @@ handle_info(
     State = #state{pmon = PMon}
 ) ->
     {noreply, update_stats(State#state{pmon = emqx_pmon:monitor(SubPid, PMon)})};
-%% The subscriber may have subscribed multiple topics, so we need to keep monitoring the PID until
-%% it `unsubscribed` the last topic.
-%% The trick is we don't demonitor the subscriber here, and (after a long time) it will eventually
-%% be disconnected.
-% handle_info({mnesia_table_event, {delete_object, OldRecord, _}}, State = #state{pmon = PMon}) ->
-%     #?SHARED_SUBSCRIPTION{subpid = SubPid} = OldRecord,
-%     {noreply, update_stats(State#state{pmon = emqx_pmon:demonitor(SubPid, PMon)})};
-
+handle_info({mnesia_table_event, {delete_object, _OldRecord, _}}, State = #state{pmon = _PMon}) ->
+    %% The subscriber may have subscribed multiple topics, so we need to keep monitoring the PID until
+    %% it `unsubscribed` the last topic.
+    %% The trick is we don't demonitor the subscriber here, and (after a long time) it will eventually
+    %% be disconnected.
+    %% #?SHARED_SUBSCRIPTION{subpid = SubPid} = OldRecord,
+    %% {noreply, update_stats(State#state{pmon = emqx_pmon:demonitor(SubPid, PMon)})};
+    %%
+    %% So we only need to update stats here.
+    {noreply, update_stats(State)};
 handle_info({mnesia_table_event, _Event}, State) ->
     {noreply, State};
 handle_info({'DOWN', _MRef, process, SubPid, Reason}, State = #state{pmon = PMon}) ->
@@ -556,10 +557,12 @@ is_active_sub(Pid, FailedSubs, All) ->
         is_alive_sub(Pid).
 
 %% erlang:is_process_alive/1 does not work with remote pid.
+is_alive_sub(Pid) when node(Pid) == node() ->
+    %% The race is when the pid is actually down cleanup_down is not evaluated yet.
+    erlang:is_process_alive(Pid);
 is_alive_sub(Pid) ->
     %% When process is not local, the best guess is it's alive.
-    %% The race is when the pid is actually down cleanup_down is not evaluated yet
-    ?IS_REMOTE_PID(Pid) orelse erlang:is_process_alive(Pid).
+    emqx_router_helper:is_routable(node(Pid)).
 
 delete_route_if_needed({Group, Topic} = GroupTopic) ->
     if_no_more_subscribers(GroupTopic, fun() ->

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 -module(emqx_bridge_pulsar_connector_SUITE).
 
@@ -53,7 +53,7 @@ only_once_tests() ->
 
 init_per_suite(Config) ->
     %% Ensure enterprise bridge module is loaded
-    _ = emqx_bridge_enterprise:module_info(),
+    emqx_utils:interactive_load(emqx_bridge_enterprise),
     %% TODO
     %% This is needed to ensure that filenames generated deep inside pulsar/replayq
     %% will not exceed 256 characters, because replayq eventually turns them into atoms.
@@ -400,7 +400,7 @@ start_consumer(TestCase, Config) ->
         cacertfile => filename:join([CertsPath, "cacert.pem"])
     },
     Opts = #{enable_ssl => UseTLS, ssl_opts => emqx_tls_lib:to_client_opts(SSLOpts)},
-    {ok, _ClientPid} = pulsar:ensure_supervised_client(ConsumerClientId, [URL], Opts),
+    {ok, _} = pulsar:ensure_supervised_client(ConsumerClientId, [URL], Opts),
     ConsumerOpts = Opts#{
         cb_init_args => #{send_to => self()},
         cb_module => pulsar_echo_consumer,

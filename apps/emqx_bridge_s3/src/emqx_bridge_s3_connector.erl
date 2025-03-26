@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_bridge_s3_connector).
@@ -128,33 +128,24 @@ on_start(InstId, Config) ->
 
 -spec on_stop(_InstanceId :: resource_id(), state()) ->
     ok.
-on_stop(InstId, _State = #{pool_name := PoolName}) ->
-    case ehttpc_sup:stop_pool(PoolName) of
-        ok ->
-            ?tp(s3_bridge_stopped, #{instance_id => InstId}),
-            ok;
-        {error, Reason} ->
-            ?SLOG(error, #{
-                msg => "s3_connector_http_pool_stop_fail",
-                pool_name => PoolName,
-                reason => Reason
-            }),
-            ok
-    end.
+on_stop(_InstId, _State = #{pool_name := PoolName}) ->
+    Res = emqx_s3_client_http:stop_pool(PoolName),
+    ?tp(s3_bridge_stopped, #{instance_id => _InstId}),
+    Res.
 
 -spec on_get_status(_InstanceId :: resource_id(), state()) ->
     health_check_status().
-on_get_status(_InstId, State = #{client_config := Config}) ->
+on_get_status(_InstId, #{client_config := Config}) ->
     case emqx_s3_client:aws_config(Config) of
         {error, Reason} ->
-            {?status_disconnected, State, map_error_details(Reason)};
+            {?status_disconnected, map_error_details(Reason)};
         AWSConfig ->
             try erlcloud_s3:list_buckets(AWSConfig) of
                 Props when is_list(Props) ->
                     ?status_connected
             catch
                 error:Error ->
-                    {?status_disconnected, State, map_error_details(Error)}
+                    {?status_disconnected, map_error_details(Error)}
             end
     end.
 

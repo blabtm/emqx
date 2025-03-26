@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -59,15 +59,15 @@ vsn_compre_test_() ->
         end}
     ].
 
-emqx_flavor_test(_Config) ->
+emqx_flavor_test() ->
     case emqx_release:edition() of
         ce ->
             ok;
         ee ->
             ?assertEqual(official, emqx_release:get_flavor()),
-            ?assertEqual("EMQX Enterprise", emqx:get_description()),
+            ?assertEqual("EMQX Enterprise", emqx_app:get_description()),
             emqx_release:set_flavor(marketplace),
             ?assertEqual(marketplace, emqx_release:get_flavor()),
-            ?assertEqual("EMQX Enterprise(marketplace)", emqx:get_description()),
+            ?assertEqual("EMQX Enterprise(marketplace)", emqx_app:get_description()),
             emqx_release:set_flavor(official)
     end.

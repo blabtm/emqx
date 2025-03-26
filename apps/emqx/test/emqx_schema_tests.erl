@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2017-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2017-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -942,3 +942,85 @@ unicode_template_test() ->
         #{<<"root">> => #{<<"template">> => <<"中文"/utf8>>}},
         hocon_tconf:check_plain(Sc, Hocon)
     ).
+
+max_packet_size_test_() ->
+    Sc = emqx_schema,
+    Check = fun(Input) ->
+        {ok, Hocon} = hocon:binary(Input),
+        hocon_tconf:check_plain(Sc, Hocon, #{}, [mqtt])
+    end,
+    [
+        {"one byte less than 256MB",
+            ?_assertMatch(
+                #{<<"mqtt">> := #{<<"max_packet_size">> := 268435455}},
+                Check(<<"mqtt.max_packet_size = 256MB">>)
+            )},
+        {"default value",
+            ?_assertMatch(
+                #{<<"mqtt">> := #{<<"max_packet_size">> := 1048576}},
+                Check(<<"mqtt.max_packet_size = null">>)
+            )},
+        {"1KB is 1024 bytes",
+            ?_assertMatch(
+                #{<<"mqtt">> := #{<<"max_packet_size">> := 1024}},
+                Check(<<"mqtt.max_packet_size = 1KB">>)
+            )},
+        {"257MB is not allowed",
+            ?_assertThrow(
+                {emqx_schema, [
+                    #{reason := #{cause := max_mqtt_packet_size_too_large, maximum := 268435455}}
+                ]},
+                Check(<<"mqtt.max_packet_size = 257MB">>)
+            )},
+        {"0 is not allowed",
+            ?_assertThrow(
+                {emqx_schema, [
+                    #{reason := #{cause := max_mqtt_packet_size_too_small, minimum := 1}}
+                ]},
+                Check(<<"mqtt.max_packet_size = 0">>)
+            )}
+    ].
+
+max_heap_size_test_() ->
+    WordSize = erlang:system_info(wordsize),
+    MaxWords = 128 * 1024 * 1024 * 1024 div WordSize,
+    MaxBytes = MaxWords * WordSize,
+    DefaultWords = 32 * 1024 * 1024 div WordSize,
+    Sc = emqx_schema,
+    Check = fun(Input) ->
+        {ok, Hocon} = hocon:binary(Input),
+        hocon_tconf:check_plain(Sc, Hocon, #{}, [force_shutdown])
+    end,
+    [
+        {"equal to default of 128GB",
+            ?_assertMatch(
+                #{<<"force_shutdown">> := #{<<"max_heap_size">> := MaxWords}},
+                Check(<<"force_shutdown.max_heap_size = 128GB">>)
+            )},
+        {"default value",
+            ?_assertMatch(
+                #{<<"force_shutdown">> := #{<<"max_heap_size">> := DefaultWords}},
+                Check(<<"force_shutdown.max_heap_size = null">>)
+            )},
+        {"divides by the wordsize",
+            ?_test(begin
+                Expected = 1024 div WordSize,
+                ?assertMatch(
+                    #{<<"force_shutdown">> := #{<<"max_heap_size">> := Expected}},
+                    Check(<<"force_shutdown.max_heap_size = 1KB">>),
+                    #{expected => Expected}
+                )
+            end)},
+        {"129GB is not allowed",
+            ?_assertThrow(
+                {emqx_schema, [
+                    #{reason := #{cause := max_heap_size_too_large, maximum := MaxBytes}}
+                ]},
+                Check(<<"force_shutdown.max_heap_size = 129GB">>)
+            )},
+        {"0 is allowed",
+            ?_assertMatch(
+                #{<<"force_shutdown">> := #{<<"max_heap_size">> := 0}},
+                Check(<<"force_shutdown.max_heap_size = 0KB">>)
+            )}
+    ].

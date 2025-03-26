@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2019-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2019-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -77,8 +77,8 @@ t_chan_info(_) ->
             zone := default,
             listener := {tcp, default},
             protocol := mqtt,
+            peername := {{127, 0, 0, 1}, 3456},
             peerhost := {127, 0, 0, 1},
-            peerport := 3456,
             sockport := 1883,
             clientid := <<"clientid">>,
             username := <<"username">>,
@@ -1063,8 +1063,8 @@ clientinfo(InitProps) ->
             zone => default,
             listener => {tcp, default},
             protocol => mqtt,
+            peername => {{127, 0, 0, 1}, 3456},
             peerhost => {127, 0, 0, 1},
-            peerport => 3456,
             sockport => 1883,
             clientid => <<"clientid">>,
             username => <<"username">>,

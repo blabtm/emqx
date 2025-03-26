@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -407,7 +407,7 @@ t_authn_data_mgmt(_) ->
 
 t_listeners_tcp(_) ->
     {204, _} = request(put, "/gateways/stomp", #{}),
-    {404, _} = request(get, "/gateways/stomp/listeners"),
+    {200, []} = request(get, "/gateways/stomp/listeners"),
     LisConf = #{
         name => <<"def">>,
         type => <<"tcp">>,
@@ -436,7 +436,7 @@ t_listeners_tcp(_) ->
 
 t_listeners_max_conns(_) ->
     {204, _} = request(put, "/gateways/stomp", #{}),
-    {404, _} = request(get, "/gateways/stomp/listeners"),
+    {200, []} = request(get, "/gateways/stomp/listeners"),
     LisConf = #{
         name => <<"def">>,
         type => <<"tcp">>,
@@ -703,6 +703,15 @@ t_authn_fuzzy_search(_) ->
 
     {204, _} = request(delete, "/gateways/stomp/authentication"),
     {204, _} = request(get, "/gateways/stomp/authentication"),
+    ok.
+
+t_cluster_status_if_gateway_sup_is_not_running(_) ->
+    application:stop(emqx_gateway),
+    ?assertEqual(
+        [#{node => node(), status => unloaded}],
+        emqx_gateway_http:cluster_gateway_status(<<"stomp">>)
+    ),
+    application:start(emqx_gateway),
     ok.
 
 %%--------------------------------------------------------------------

@@ -36,7 +36,7 @@ assert_otp() ->
     end.
 
 quicer() ->
-    {quicer, {git, "https://github.com/emqx/quic.git", {tag, "0.1.10"}}}.
+    {quicer, {git, "https://github.com/emqx/quic.git", {tag, "0.1.11"}}}.
 
 jq() ->
     {jq, {git, "https://github.com/emqx/jq", {tag, "v0.3.12"}}}.
@@ -101,6 +101,7 @@ is_community_umbrella_app("apps/emqx_bridge_timescale") -> false;
 is_community_umbrella_app("apps/emqx_bridge_oracle") -> false;
 is_community_umbrella_app("apps/emqx_bridge_sqlserver") -> false;
 is_community_umbrella_app("apps/emqx_bridge_datalayers") -> false;
+is_community_umbrella_app("apps/emqx_bridge_tablestore") -> false;
 is_community_umbrella_app("apps/emqx_oracle") -> false;
 is_community_umbrella_app("apps/emqx_bridge_rabbitmq") -> false;
 is_community_umbrella_app("apps/emqx_ft") -> false;
@@ -198,7 +199,7 @@ plugins() ->
 test_plugins() ->
     [
         {rebar3_proper, "0.12.1"},
-        {coveralls, {git, "https://github.com/emqx/coveralls-erl", {tag, "v2.2.0-emqx-3"}}}
+        {coveralls, {git, "https://github.com/emqx/coveralls-erl", {tag, "v2.2.0-emqx-5"}}}
     ].
 
 test_deps() ->
@@ -493,6 +494,7 @@ relx_overlay(ReleaseType, Edition) ->
         {copy, "bin/emqx", "bin/emqx"},
         {copy, "bin/emqx_ctl", "bin/emqx_ctl"},
         {copy, "bin/emqx_cluster_rescue", "bin/emqx_cluster_rescue"},
+        {copy, "bin/emqx_fw", "bin/emqx_fw"},
         {copy, "bin/node_dump", "bin/node_dump"},
         {copy, "bin/install_upgrade.escript", "bin/install_upgrade.escript"},
         {copy, "bin/emqx", "bin/emqx-{{release_version}}"},
@@ -541,7 +543,8 @@ emqx_etc_overlay_per_rel(_RelType) ->
 emqx_etc_overlay() ->
     [
         {"{{base_dir}}/lib/emqx/etc/ssl_dist.conf", "etc/ssl_dist.conf"},
-        {"{{base_dir}}/lib/emqx_conf/etc/emqx.conf.all", "etc/emqx.conf"}
+        {"{{base_dir}}/lib/emqx_conf/etc/emqx.conf.all", "etc/emqx.conf"},
+        {"{{base_dir}}/lib/emqx_conf/etc/base.hocon", "etc/base.hocon"}
     ].
 
 get_vsn(Profile) ->

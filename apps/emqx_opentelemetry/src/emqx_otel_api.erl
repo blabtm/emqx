@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 -module(emqx_otel_api).
 
@@ -103,6 +103,8 @@ otel_config_example() ->
         },
         traces => #{
             enable => true,
+            max_queue_size => 2048,
+            scheduled_delay => "5s",
             filter => #{
                 trace_all => false,
                 trace_mode => legacy,

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2019-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2019-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -547,7 +547,7 @@ force_set_config_file_paths(emqx, Paths) ->
     %% we need init cluster conf, so we can save the cluster conf to the file
     application:set_env(emqx, local_override_conf_file, "local_override.conf"),
     application:set_env(emqx, cluster_override_conf_file, "cluster_override.conf"),
-    application:set_env(emqx, cluster_conf_file, "cluster.hocon"),
+    application:set_env(emqx, cluster_hocon_file, "cluster.hocon"),
     application:set_env(emqx, config_files, Paths);
 force_set_config_file_paths(_, _) ->
     ok.
@@ -627,7 +627,7 @@ is_tcp_server_available(Host, Port, Timeout) ->
     end.
 
 start_ekka() ->
-    try mnesia_hook:module_info() of
+    try mnesia_hook:module_info(module) of
         _ -> ekka:start()
     catch
         _:_ ->

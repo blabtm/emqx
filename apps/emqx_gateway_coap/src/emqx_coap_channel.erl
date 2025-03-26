@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2017-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2017-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -478,13 +478,16 @@ enrich_conninfo(
 ) ->
     case Queries of
         #{<<"clientid">> := ClientId} ->
-            Interval = emqx_keepalive:info(check_interval, KeepAlive),
+            %% in milliseconds
+            IntervalMs = emqx_keepalive:info(check_interval, KeepAlive),
+            %% in seconds
+            InternalS = floor(IntervalMs / 1000),
             NConnInfo = ConnInfo#{
                 clientid => ClientId,
                 proto_name => <<"CoAP">>,
                 proto_ver => <<"1">>,
                 clean_start => true,
-                keepalive => Interval,
+                keepalive => InternalS,
                 expiry_interval => 0
             },
             {ok, Channel#channel{conninfo = NConnInfo}};

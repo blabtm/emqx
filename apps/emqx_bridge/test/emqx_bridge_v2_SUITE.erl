@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -24,6 +24,52 @@
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
 
 -import(emqx_common_test_helpers, [on_exit/1]).
+
+-define(ON(NODE, BODY), erpc:call(NODE, fun() -> BODY end)).
+
+%%------------------------------------------------------------------------------
+%% CT boilerplate
+%%------------------------------------------------------------------------------
+
+init_per_suite(Config) ->
+    Apps = emqx_cth_suite:start(
+        app_specs(),
+        #{work_dir => emqx_cth_suite:work_dir(Config)}
+    ),
+    [{apps, Apps} | Config].
+
+end_per_suite(Config) ->
+    Apps = ?config(apps, Config),
+    emqx_cth_suite:stop(Apps),
+    ok.
+
+app_specs() ->
+    [
+        emqx,
+        emqx_conf,
+        emqx_connector,
+        emqx_bridge,
+        emqx_rule_engine
+    ].
+
+init_per_testcase(_TestCase, Config) ->
+    %% Setting up mocks for fake connector and bridge V2
+    setup_mocks(),
+    ets:new(fun_table_name(), [named_table, public]),
+    %% Create a fake connector
+    {ok, _} = emqx_connector:create(con_type(), con_name(), con_config()),
+    Config.
+
+end_per_testcase(_TestCase, _Config) ->
+    ets:delete(fun_table_name()),
+    emqx_common_test_helpers:call_janitor(),
+    delete_all_bridges_and_connectors(),
+    meck:unload(),
+    ok.
+
+%%------------------------------------------------------------------------------
+%% Helper fns
+%%------------------------------------------------------------------------------
 
 con_mod() ->
     emqx_bridge_v2_test_connector.
@@ -119,7 +165,7 @@ start_apps() ->
     ].
 
 setup_mocks() ->
-    MeckOpts = [passthrough, no_link, no_history, non_strict],
+    MeckOpts = [passthrough, no_link, no_history],
 
     catch meck:new(emqx_connector_schema, MeckOpts),
     meck:expect(emqx_connector_schema, fields, 1, con_schema()),
@@ -144,57 +190,8 @@ setup_mocks() ->
     meck:expect(emqx_bridge_v2, is_bridge_v2_type, fun(Type) -> Type =:= BridgeType end),
     ok.
 
-init_per_suite(Config) ->
-    Apps = emqx_cth_suite:start(
-        app_specs(),
-        #{work_dir => emqx_cth_suite:work_dir(Config)}
-    ),
-    [{apps, Apps} | Config].
-
-end_per_suite(Config) ->
-    Apps = ?config(apps, Config),
-    emqx_cth_suite:stop(Apps),
-    ok.
-
-app_specs() ->
-    [
-        emqx,
-        emqx_conf,
-        emqx_connector,
-        emqx_bridge,
-        emqx_rule_engine
-    ].
-
-init_per_testcase(_TestCase, Config) ->
-    %% Setting up mocks for fake connector and bridge V2
-    setup_mocks(),
-    ets:new(fun_table_name(), [named_table, public]),
-    %% Create a fake connector
-    {ok, _} = emqx_connector:create(con_type(), con_name(), con_config()),
-    Config.
-
-end_per_testcase(_TestCase, _Config) ->
-    ets:delete(fun_table_name()),
-    delete_all_bridges_and_connectors(),
-    meck:unload(),
-    emqx_common_test_helpers:call_janitor(),
-    ok.
-
 delete_all_bridges_and_connectors() ->
-    lists:foreach(
-        fun(#{name := Name, type := Type}) ->
-            ct:pal("removing bridge ~p", [{Type, Name}]),
-            emqx_bridge_v2:remove(Type, Name)
-        end,
-        emqx_bridge_v2:list()
-    ),
-    lists:foreach(
-        fun(#{name := Name, type := Type}) ->
-            ct:pal("removing connector ~p", [{Type, Name}]),
-            emqx_connector:remove(Type, Name)
-        end,
-        emqx_connector:list()
-    ),
+    emqx_bridge_v2_testlib:delete_all_bridges_and_connectors(),
     update_root_config(#{}),
     ok.
 
@@ -215,6 +212,40 @@ update_root_config(RootConf) ->
 
 update_root_connectors_config(RootConf) ->
     emqx_conf:update([connectors], RootConf, #{override_to => cluster}).
+
+wait_until(Fun) ->
+    wait_until(Fun, 5000).
+
+wait_until(Fun, Timeout) when Timeout >= 0 ->
+    case Fun() of
+        true ->
+            ok;
+        false ->
+            IdleTime = 100,
+            timer:sleep(IdleTime),
+            wait_until(Fun, Timeout - IdleTime)
+    end;
+wait_until(_, _) ->
+    ct:fail("Wait until event did not happen").
+
+bin(Bin) when is_binary(Bin) -> Bin;
+bin(Str) when is_list(Str) -> list_to_binary(Str);
+bin(Atom) when is_atom(Atom) -> atom_to_binary(Atom, utf8).
+
+get_rule_metrics(RuleId) ->
+    emqx_metrics_worker:get_metrics(rule_metrics, RuleId).
+
+get_bridge_v2_alarm_cnt() ->
+    Alarms = emqx_alarm:get_alarms(activated),
+    FilterFun = fun
+        (#{name := S}) when is_binary(S) -> string:find(S, "action") =/= nomatch;
+        (_) -> false
+    end,
+    length(lists:filter(FilterFun, Alarms)).
+
+%%------------------------------------------------------------------------------
+%% Test cases
+%%------------------------------------------------------------------------------
 
 t_create_remove(_) ->
     {ok, _} = emqx_bridge_v2:create(bridge_type(), my_test_bridge, bridge_config()),
@@ -368,7 +399,13 @@ t_send_message(_) ->
 
 t_send_message_through_rule(_) ->
     BridgeName = my_test_bridge,
-    {ok, _} = emqx_bridge_v2:create(bridge_type(), BridgeName, bridge_config()),
+    BridgeType = bridge_type(),
+    BridgeConfig0 =
+        emqx_utils_maps:deep_merge(
+            bridge_config(),
+            #{<<"resource_opts">> => #{<<"query_mode">> => <<"async">>}}
+        ),
+    {ok, _} = emqx_bridge_v2:create(BridgeType, BridgeName, BridgeConfig0),
     %% Create a rule to send message to the bridge
     {ok, #{id := RuleId}} = emqx_rule_engine:create_rule(
         #{
@@ -398,6 +435,72 @@ t_send_message_through_rule(_) ->
     after 10000 ->
         ct:fail("Failed to receive message")
     end,
+    ?assertMatch(
+        #{
+            counters :=
+                #{
+                    'matched' := 1,
+                    'failed' := 0,
+                    'passed' := 1,
+                    'actions.success' := 1,
+                    'actions.failed' := 0,
+                    'actions.failed.unknown' := 0,
+                    'actions.failed.out_of_service' := 0
+                }
+        },
+        get_rule_metrics(RuleId)
+    ),
+    %% Now, turn off connector.  Should increase `actions.out_of_service' metric.
+    {ok, _} = emqx_connector:create(con_type(), con_name(), (con_config())#{<<"enable">> := false}),
+    emqx:publish(Msg),
+    ?retry(
+        100,
+        10,
+        ?assertMatch(
+            #{
+                counters :=
+                    #{
+                        'matched' := 2,
+                        'failed' := 0,
+                        'passed' := 2,
+                        'actions.success' := 1,
+                        'actions.failed' := 1,
+                        'actions.failed.unknown' := 0,
+                        'actions.failed.out_of_service' := 1,
+                        'actions.discarded' := 0
+                    }
+            },
+            get_rule_metrics(RuleId)
+        )
+    ),
+    %% Sync query
+    BridgeConfig1 =
+        emqx_utils_maps:deep_merge(
+            bridge_config(),
+            #{<<"resource_opts">> => #{<<"query_mode">> => <<"sync">>}}
+        ),
+    {ok, _} = emqx_bridge_v2:create(BridgeType, BridgeName, BridgeConfig1),
+    emqx:publish(Msg),
+    ?retry(
+        100,
+        10,
+        ?assertMatch(
+            #{
+                counters :=
+                    #{
+                        'matched' := 3,
+                        'failed' := 0,
+                        'passed' := 3,
+                        'actions.success' := 1,
+                        'actions.failed' := 2,
+                        'actions.failed.unknown' := 0,
+                        'actions.failed.out_of_service' := 2,
+                        'actions.discarded' := 0
+                    }
+            },
+            get_rule_metrics(RuleId)
+        )
+    ),
     unregister(registered_process_name()),
     ok = emqx_bridge_v2:remove(bridge_type(), BridgeName),
     ok.
@@ -619,14 +722,6 @@ t_unhealthy_channel_alarm(_) ->
     ok = emqx_bridge_v2:remove(bridge_type(), my_test_bridge),
     0 = get_bridge_v2_alarm_cnt(),
     ok.
-
-get_bridge_v2_alarm_cnt() ->
-    Alarms = emqx_alarm:get_alarms(activated),
-    FilterFun = fun
-        (#{name := S}) when is_binary(S) -> string:find(S, "action") =/= nomatch;
-        (_) -> false
-    end,
-    length(lists:filter(FilterFun, Alarms)).
 
 t_load_no_matching_connector(_Config) ->
     Conf = bridge_config(),
@@ -1097,7 +1192,7 @@ t_query_uses_action_query_mode(_Config) ->
     %% when querying the resource.
 
     %% Set one query mode for the connector...
-    meck:new(con_mod(), [passthrough, no_history, non_strict]),
+    meck:new(con_mod(), [passthrough, no_history]),
     on_exit(fun() -> catch meck:unload([con_mod()]) end),
     meck:expect(con_mod(), query_mode, 1, sync),
     meck:expect(con_mod(), callback_mode, 0, always_sync),
@@ -1159,23 +1254,130 @@ t_query_uses_action_query_mode(_Config) ->
     ),
     ok.
 
-%% Helper Functions
+t_async_load_config_cli(_Config) ->
+    ResponseETS = ets:new(response_ets, [public]),
+    ets:insert(ResponseETS, {on_start_value, hang}),
+    TestPid = self(),
+    OnStartFun = wrap_fun(fun(_Conf) ->
+        case ets:lookup_element(ResponseETS, on_start_value, 2) of
+            hang ->
+                persistent_term:put({?MODULE, res_pid}, self()),
+                TestPid ! hanging,
+                receive
+                    go ->
+                        ets:insert(ResponseETS, {on_start_value, continue})
+                end;
+            continue ->
+                ok
+        end,
+        {ok, connector_state}
+    end),
+    on_exit(fun() ->
+        case persistent_term:get({?MODULE, res_pid}, undefined) of
+            undefined ->
+                ct:fail("resource didn't start");
+            ResPid ->
+                ResPid ! go,
+                ok
+        end
+    end),
 
-wait_until(Fun) ->
-    wait_until(Fun, 5000).
+    ConnectorType = con_type(),
+    ConnectorName = atom_to_binary(?FUNCTION_NAME),
+    ConnectorConfig = emqx_utils_maps:deep_merge(con_config(), #{
+        <<"resource_opts">> => #{<<"start_timeout">> => 100},
+        <<"on_start_fun">> => OnStartFun
+    }),
+    %% Make the resource stuck while starting
+    spawn_link(fun() ->
+        {ok, _} = emqx_connector:create(ConnectorType, ConnectorName, ConnectorConfig)
+    end),
+    receive
+        hanging ->
+            ok
+    after 1_000 ->
+        ct:fail("connector not started and stuck")
+    end,
 
-wait_until(Fun, Timeout) when Timeout >= 0 ->
-    case Fun() of
-        true ->
-            ok;
-        false ->
-            IdleTime = 100,
-            timer:sleep(IdleTime),
-            wait_until(Fun, Timeout - IdleTime)
-    end;
-wait_until(_, _) ->
-    ct:fail("Wait until event did not happen").
+    ActionType = bridge_type(),
+    ActionName = ConnectorName,
+    ActionConfig = bridge_config(),
 
-bin(Bin) when is_binary(Bin) -> Bin;
-bin(Str) when is_list(Str) -> list_to_binary(Str);
-bin(Atom) when is_atom(Atom) -> atom_to_binary(Atom, utf8).
+    SourceType = bridge_type(),
+    SourceName = ConnectorName,
+    SourceConfig = bridge_config(),
+
+    RawConfig = #{
+        <<"actions">> => #{ActionType => #{ActionName => ActionConfig}},
+        <<"sources">> => #{SourceType => #{SourceName => SourceConfig}}
+    },
+    ConfigToLoadBin = iolist_to_binary(hocon_pp:do(RawConfig, #{})),
+    ct:pal("loading config..."),
+    ct:timetrap(5_000),
+    ?assertMatch(ok, emqx_conf_cli:load_config(ConfigToLoadBin, #{mode => merge})),
+    ct:pal("config loaded"),
+
+    ok.
+
+%% Checks that we avoid touching `created_at' and `last_modified_at' when replicating
+%% cluster RPC configurations.
+t_modification_dates_when_replicating(Config) ->
+    AppSpecs = app_specs() ++ [emqx_management],
+    ClusterSpec = [
+        {mod_dates1, #{apps => AppSpecs ++ [emqx_mgmt_api_test_util:emqx_dashboard()]}},
+        {mod_dates2, #{apps => AppSpecs}}
+    ],
+    [N1, N2] =
+        Nodes = emqx_cth_cluster:start(
+            ClusterSpec,
+            #{work_dir => emqx_cth_suite:work_dir(?FUNCTION_NAME, Config)}
+        ),
+    Fun = fun() -> ?ON(N1, emqx_mgmt_api_test_util:auth_header_()) end,
+    emqx_bridge_v2_testlib:set_auth_header_getter(Fun),
+    snabbkaffe:start_trace(),
+    try
+        ConnectorName = mod_dates,
+        {201, _} = emqx_bridge_mqtt_v2_publisher_SUITE:create_connector_api(
+            [
+                {connector_type, mqtt},
+                {connector_name, ConnectorName},
+                {connector_config, emqx_bridge_mqtt_v2_publisher_SUITE:connector_config()}
+            ],
+            #{}
+        ),
+        snabbkaffe_nemesis:inject_crash(
+            ?match_event(#{?snk_kind := bridge_post_config_update_done}),
+            fun(_) ->
+                %% Only introduces a bit of delay, so that we are guaranteed some time
+                %% difference when replicating.
+                ct:sleep(100),
+                false
+            end
+        ),
+        {201, _} = emqx_bridge_mqtt_v2_publisher_SUITE:create_action_api(
+            [
+                {bridge_kind, action},
+                {action_type, mqtt},
+                {action_name, ConnectorName},
+                {action_config,
+                    emqx_bridge_mqtt_v2_publisher_SUITE:action_config(#{
+                        <<"connector">> => ConnectorName
+                    })}
+            ],
+            #{}
+        ),
+        #{
+            <<"created_at">> := CreatedAt1,
+            <<"last_modified_at">> := LastModifiedAt1
+        } = ?ON(N1, emqx_config:get_raw([actions, mqtt, ConnectorName])),
+        #{
+            <<"created_at">> := CreatedAt2,
+            <<"last_modified_at">> := LastModifiedAt2
+        } = ?ON(N2, emqx_config:get_raw([actions, mqtt, ConnectorName])),
+        ?assertEqual(CreatedAt1, CreatedAt2),
+        ?assertEqual(LastModifiedAt1, LastModifiedAt2),
+        ok
+    after
+        emqx_cth_cluster:stop(Nodes),
+        snabbkaffe:stop()
+    end.

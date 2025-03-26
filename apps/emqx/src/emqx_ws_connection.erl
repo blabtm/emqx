@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2018-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2018-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -22,11 +22,14 @@
 -include("emqx_mqtt.hrl").
 -include("logger.hrl").
 -include("types.hrl").
+-include("emqx_external_trace.hrl").
 
 -ifdef(TEST).
 -compile(export_all).
 -compile(nowarn_export_all).
 -endif.
+
+-elvis([{elvis_style, used_ignored_variable, disable}]).
 
 %% API
 -export([
@@ -97,7 +100,10 @@
     limiter_buffer :: queue:queue(cache()),
 
     %% limiter timers
-    limiter_timer :: undefined | reference()
+    limiter_timer :: undefined | reference(),
+
+    %% Extra field for future hot-upgrade support
+    extra = []
 }).
 
 -record(retry, {
@@ -330,7 +336,8 @@ websocket_init([Req, Opts]) ->
                     zone = Zone,
                     listener = {Type, Listener},
                     limiter_timer = undefined,
-                    limiter_buffer = queue:new()
+                    limiter_buffer = queue:new(),
+                    extra = []
                 },
                 hibernate};
         {denny, Reason} ->
@@ -795,7 +802,15 @@ with_channel(Fun, Args, State = #state{channel = Channel}) ->
 %% Handle outgoing packets
 %%--------------------------------------------------------------------
 
-handle_outgoing(
+handle_outgoing(Packets, State = #state{channel = _Channel}) ->
+    Res = do_handle_outgoing(Packets, State),
+    _ = ?EXT_TRACE_OUTGOING_STOP(
+        emqx_external_trace:basic_attrs(_Channel),
+        Packets
+    ),
+    Res.
+
+do_handle_outgoing(
     Packets,
     State = #state{
         mqtt_piggyback = MQTTPiggyback,
@@ -1076,7 +1091,7 @@ check_max_connection(Type, Listener) ->
         infinity ->
             allow;
         Max ->
-            MatchSpec = [{{'_', emqx_ws_connection}, [], [true]}],
+            MatchSpec = [{#chan_conn{mod = emqx_ws_connection, _ = '_'}, [], [true]}],
             Curr = ets:select_count(?CHAN_CONN_TAB, MatchSpec),
             case Curr >= Max of
                 false ->

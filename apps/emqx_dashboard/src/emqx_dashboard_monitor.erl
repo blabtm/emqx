@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@
 
 -behaviour(gen_server).
 
--export([create_tables/0]).
+-export([create_tables/0, clear_table/0]).
 -export([start_link/0]).
 
 -export([
@@ -98,6 +98,9 @@ create_tables() ->
     ]),
     [?TAB].
 
+clear_table() ->
+    mria:clear_table(?TAB).
+
 %% -------------------------------------------------------------------------------------------------
 %% API
 
@@ -133,7 +136,7 @@ current_rate(Node) when Node == node() ->
             {ok, maps:merge(maps:from_list(Rate0), non_rate_value())}
     end;
 current_rate(Node) ->
-    case emqx_dashboard_proto_v1:current_rate(Node) of
+    case emqx_dashboard_proto_v2:current_rate(Node) of
         {badrpc, Reason} ->
             {badrpc, #{node => Node, reason => Reason}};
         {ok, Rate} ->
@@ -316,7 +319,7 @@ do_sample(all, Time) when is_integer(Time) ->
 do_sample(Node, Time) when Node == node() andalso is_integer(Time) ->
     do_sample_local(Time);
 do_sample(Node, Time) when is_integer(Time) ->
-    case emqx_dashboard_proto_v1:do_sample(Node, Time) of
+    case emqx_dashboard_proto_v2:do_sample(Node, Time) of
         {badrpc, Reason} ->
             {badrpc, #{node => Node, reason => Reason}};
         Res ->
@@ -348,7 +351,7 @@ sample_nodes(Nodes, Time) ->
     lists:foldl(fun(I, B) -> merge_samplers(Time, I, B) end, #{}, Success).
 
 concurrently_sample_nodes(Nodes, Time) ->
-    %% emqx_dashboard_proto_v1:do_sample has a timeout (5s),
+    %% emqx_dashboard_proto_v2:do_sample has a timeout (5s),
     %% call emqx_utils:pmap here instead of a rpc multicall
     %% to avoid having to introduce a new bpapi proto version
     emqx_utils:pmap(fun(Node) -> do_sample(Node, Time) end, Nodes, infinity).
@@ -488,7 +491,7 @@ cal_rate(
 cal_rate_(Key, {Now, Last, TDelta, Res}) ->
     NewValue = maps:get(Key, Now),
     LastValue = maps:get(Key, Last),
-    Rate = ((NewValue - LastValue) * 1000) div TDelta,
+    Rate = round((NewValue - LastValue) * 1000 / TDelta),
     RateKey = maps:get(Key, ?DELTA_SAMPLER_RATE_MAP),
     {Now, Last, TDelta, Res#{RateKey => Rate}}.
 

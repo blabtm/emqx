@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -56,11 +56,16 @@ init([]) ->
     {ok, {SupFlags, ChildSpecs}}.
 
 child_spec(ResId, Group, ResourceType, Config, Opts) ->
+    RestartType =
+        case emqx_resource:is_dry_run(ResId) of
+            true -> temporary;
+            false -> transient
+        end,
     #{
         id => ResId,
         start =>
             {emqx_resource_manager, start_link, [ResId, Group, ResourceType, Config, Opts]},
-        restart => transient,
+        restart => RestartType,
         %% never force kill a resource manager.
         %% because otherwise it may lead to release leak,
         %% resource_manager's terminate callback calls resource on_stop

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2017-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2017-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -343,20 +343,17 @@ delivery(Msg) -> #delivery{sender = self(), message = Msg}.
 %%--------------------------------------------------------------------
 
 route(Routes, Delivery = #delivery{message = _Msg}, PersistRes) ->
-    ?EXT_TRACE_WITH_PROCESS_FUN(
-        msg_route,
-        Delivery,
-        (emqx_otel_trace:msg_attrs(_Msg))#{
+    ?EXT_TRACE_MSG_ROUTE(
+        ?EXT_TRACE_ATTR((emqx_otel_trace:msg_attrs(_Msg))#{
             'route.from' => node(),
             'route.matched_result' => emqx_utils_json:encode([
                 route_result({TF, RouteTo})
              || {TF, RouteTo} <- Routes
             ]),
             'client.clientid' => _Msg#message.from
-        },
-        fun(DeliveryWithTrace) ->
-            do_route(Routes, DeliveryWithTrace, PersistRes)
-        end
+        }),
+        fun(DeliveryWithTrace) -> do_route(Routes, DeliveryWithTrace, PersistRes) end,
+        [Delivery]
     ).
 
 -if(?EMQX_RELEASE_EDITION == ee).
@@ -408,14 +405,18 @@ do_route2({To, Group}, Delivery) when is_tuple(Group); is_binary(Group) ->
 aggre([]) ->
     [];
 aggre([#route{topic = To, dest = Node}]) when is_atom(Node) ->
-    [{To, Node}];
+    [{To, Node} || emqx_router_helper:is_routable(Node)];
 aggre([#route{topic = To, dest = {Group, _Node}}]) ->
     [{To, Group}];
 aggre(Routes) ->
     aggre(Routes, false, []).
 
 aggre([#route{topic = To, dest = Node} | Rest], Dedup, Acc) when is_atom(Node) ->
-    aggre(Rest, Dedup, [{To, Node} | Acc]);
+    case emqx_router_helper:is_routable(Node) of
+        true -> NAcc = [{To, Node} | Acc];
+        false -> NAcc = Acc
+    end,
+    aggre(Rest, Dedup, NAcc);
 aggre([#route{topic = To, dest = {Group, _Node}} | Rest], _Dedup, Acc) ->
     aggre(Rest, true, [{To, Group} | Acc]);
 aggre([], false, Acc) ->
@@ -427,22 +428,22 @@ do_forward_external(Delivery, RouteRes) ->
     emqx_external_broker:forward(Delivery) ++ RouteRes.
 
 forward(Node, To, Delivery = #delivery{message = _Msg}, RpcMode) ->
-    ?EXT_TRACE_WITH_PROCESS_FUN(
-        msg_forward,
-        Delivery,
-        (emqx_otel_trace:msg_attrs(_Msg))#{
+    ?EXT_TRACE_MSG_FORWARD(
+        ?EXT_TRACE_ATTR((emqx_otel_trace:msg_attrs(_Msg))#{
             'forward.from' => node(),
             'forward.to' => Node,
             'client.clientid' => _Msg#message.from
-        },
-        fun(DeliveryWithTrace) ->
-            do_forward(Node, To, DeliveryWithTrace, RpcMode)
-        end
+        }),
+        fun(NDelivery) -> do_forward(Node, To, NDelivery, RpcMode) end,
+        [Delivery]
     ).
 
 %% @doc Forward message to another node.
 -spec do_forward(
-    node(), emqx_types:topic() | emqx_types:share(), emqx_types:delivery(), RpcMode :: sync | async
+    node(),
+    emqx_types:topic() | emqx_types:share(),
+    emqx_types:delivery(),
+    RpcMode :: sync | async
 ) ->
     emqx_types:deliver_result().
 do_forward(Node, To, Delivery, async) ->
@@ -469,14 +470,16 @@ do_forward(Node, To, Delivery, sync) ->
 %% Handle message forwarding form remote nodes by
 %% `emqx_broker_proto_v1:forward/3` or
 %% `emqx_broker_proto_v1:forward_async/3`
-dispatch(Topic, Delivery = #delivery{message = _Msg}) ->
-    ?EXT_TRACE_WITH_PROCESS_FUN(
-        msg_handle_forward,
-        Delivery,
-        (emqx_otel_trace:msg_attrs(_Msg))#{'client.clientid' => _Msg#message.from},
-        fun(DeliveryWithTrace) ->
-            do_dispatch(Topic, DeliveryWithTrace)
-        end
+dispatch(Topic, Delivery = #delivery{sender = _Sender, message = _Msg}) ->
+    ?EXT_TRACE_MSG_HANDLE_FORWARD(
+        ?EXT_TRACE_ATTR((emqx_otel_trace:msg_attrs(_Msg))#{
+            %%% XXX: Pid not checked
+            'forward.from' => erlang:node(_Sender),
+            'forward.to' => node(),
+            'client.clientid' => _Msg#message.from
+        }),
+        fun(NDelivery) -> do_dispatch(Topic, NDelivery) end,
+        [Delivery]
     ).
 
 %% @doc Dispatch message to local subscribers.

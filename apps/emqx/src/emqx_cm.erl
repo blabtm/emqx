@@ -1,5 +1,5 @@
 %%-------------------------------------------------------------------
-%% Copyright (c) 2017-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2017-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -25,7 +25,6 @@
 -include("emqx_mqtt.hrl").
 -include("emqx_external_trace.hrl").
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
--include_lib("stdlib/include/qlc.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
 -export([start_link/0]).
@@ -75,8 +74,8 @@
 
 %% Client management
 -export([
-    all_channels_table/1,
-    live_connection_table/1
+    all_channels_stream/1,
+    live_connection_stream/1
 ]).
 
 %% gen_server callbacks
@@ -96,7 +95,8 @@
     mark_channel_connected/1,
     mark_channel_disconnected/1,
     is_channel_connected/1,
-    get_connected_client_count/0
+    get_connected_client_count/0,
+    get_sessions_count/0
 ]).
 
 %% RPC targets
@@ -114,8 +114,6 @@
     channel_info/0,
     chan_pid/0
 ]).
-
--type message() :: emqx_types:message().
 
 -type chan_pid() :: pid().
 
@@ -138,7 +136,9 @@
 ]).
 
 %% Batch drain
--define(BATCH_SIZE, 100000).
+-define(BATCH_SIZE, 1000).
+
+-define(CHAN_INFO_SELECT_LIMIT, 100).
 
 %% Server name
 -define(CM, ?MODULE).
@@ -192,12 +192,12 @@ register_channel(ClientId, ChanPid, #{conn_mod := ConnMod}) when
     is_pid(ChanPid) andalso ?IS_CLIENTID(ClientId)
 ->
     Chan = {ClientId, ChanPid},
-    %% cast (for process monitor) before inserting ets tables
-    cast({registered, Chan}),
+    true = ets:insert(?CHAN_CONN_TAB, #chan_conn{pid = ChanPid, mod = ConnMod, clientid = ClientId}),
+    %% cast (for process monitor) after inserting the conn table
+    ok = cast({registered, ChanPid}),
     true = ets:insert(?CHAN_TAB, Chan),
-    true = ets:insert(?CHAN_CONN_TAB, {Chan, ConnMod}),
     ok = emqx_cm_registry:register_channel(Chan),
-    mark_channel_connected(ChanPid),
+    ok = mark_channel_connected(ChanPid),
     ok.
 
 %% @doc Unregister a channel.
@@ -209,7 +209,7 @@ unregister_channel(ClientId) when ?IS_CLIENTID(ClientId) ->
 %% @private
 do_unregister_channel({_ClientId, ChanPid} = Chan) ->
     ok = emqx_cm_registry:unregister_channel(Chan),
-    true = ets:delete(?CHAN_CONN_TAB, Chan),
+    true = ets:delete(?CHAN_CONN_TAB, ChanPid),
     true = ets:delete(?CHAN_INFO_TAB, Chan),
     ets:delete_object(?CHAN_TAB, Chan),
     ok = emqx_hooks:run('cm.channel.unregistered', [ChanPid]),
@@ -285,7 +285,7 @@ set_chan_stats(ClientId, ChanPid, Stats) when ?IS_CLIENTID(ClientId) ->
     _CleanStart :: boolean(),
     emqx_types:clientinfo(),
     emqx_types:conninfo(),
-    emqx_maybe:t(message())
+    emqx_maybe:t(emqx_types:message())
 ) ->
     {ok, #{
         session := emqx_session:t(),
@@ -459,14 +459,6 @@ discard_session(ClientId) when is_binary(ClientId) ->
 when
     Action :: kick | discard | {takeover, 'begin'} | {takeover, 'end'} | takeover_kick.
 request_stepdown(Action, ConnMod, Pid) ->
-    ?EXT_TRACE_WITH_PROCESS_FUN(
-        broker_disconnect,
-        [],
-        maps:merge(basic_trace_attrs(Pid), action_to_reason(Action)),
-        fun([]) -> do_request_stepdown(Action, ConnMod, Pid) end
-    ).
-
-do_request_stepdown(Action, ConnMod, Pid) ->
     Timeout =
         case Action == kick orelse Action == discard of
             true -> ?T_KICK;
@@ -650,33 +642,56 @@ all_channels() ->
     ets:select(?CHAN_TAB, Pat).
 
 %% @doc Get clientinfo for all clients
-all_channels_table(ConnModuleList) ->
+-spec all_channels_stream([module()]) ->
+    emqx_utils_stream:stream({
+        emqx_types:clientid(),
+        _ConnState :: atom(),
+        emqx_types:conninfo(),
+        emqx_types:clientinfo()
+    }).
+all_channels_stream(ConnModuleList) ->
     Ms = ets:fun2ms(
         fun({{ClientId, _ChanPid}, Info, _Stats}) ->
             {ClientId, Info}
         end
     ),
-    Table = ets:table(?CHAN_INFO_TAB, [{traverse, {select, Ms}}]),
     ConnModules = sets:from_list(ConnModuleList, [{version, 2}]),
-    qlc:q([
-        {ClientId, ConnState, ConnInfo, ClientInfo}
-     || {ClientId, #{
-            conn_state := ConnState,
-            clientinfo := ClientInfo,
-            conninfo := #{conn_mod := ConnModule} = ConnInfo
-        }} <-
-            Table,
-        sets:is_element(ConnModule, ConnModules)
-    ]).
+    AllChanInfoStream = emqx_utils_stream:ets(fun
+        (undefined) -> ets:select(?CHAN_INFO_TAB, Ms, ?CHAN_INFO_SELECT_LIMIT);
+        (Cont) -> ets:select(Cont)
+    end),
+    WithModulesFilteredStream = emqx_utils_stream:filter(
+        fun({_, #{conninfo := #{conn_mod := ConnModule}}}) ->
+            sets:is_element(ConnModule, ConnModules)
+        end,
+        AllChanInfoStream
+    ),
+    %% Map to the plain tuples
+    emqx_utils_stream:map(
+        fun(
+            {ClientId, #{
+                conn_state := ConnState,
+                clientinfo := ClientInfo,
+                conninfo := ConnInfo
+            }}
+        ) ->
+            {ClientId, ConnState, ConnInfo, ClientInfo}
+        end,
+        WithModulesFilteredStream
+    ).
 
 %% @doc Get all local connection query handle
-live_connection_table(ConnModules) ->
-    Ms = lists:map(fun live_connection_ms/1, ConnModules),
-    Table = ets:table(?CHAN_CONN_TAB, [{traverse, {select, Ms}}]),
-    qlc:q([{ClientId, ChanPid} || {ClientId, ChanPid} <- Table, is_channel_connected(ChanPid)]).
+-spec live_connection_stream([module()]) -> emqx_utils_stream:stream(pid()).
+live_connection_stream(ConnModules) ->
+    Ms = lists:flatmap(fun live_connection_ms/1, ConnModules),
+    AllConnStream = emqx_utils_stream:ets(fun
+        (undefined) -> ets:select(?CHAN_CONN_TAB, Ms, ?CHAN_INFO_SELECT_LIMIT);
+        (Cont) -> ets:select(Cont)
+    end),
+    emqx_utils_stream:filter(fun is_channel_connected/1, AllConnStream).
 
 live_connection_ms(ConnModule) ->
-    {{{'$1', '$2'}, ConnModule}, [], [{{'$1', '$2'}}]}.
+    ets:fun2ms(fun(#chan_conn{mod = M, pid = Pid}) when M =:= ConnModule -> Pid end).
 
 is_channel_connected(ChanPid) when node(ChanPid) =:= node() ->
     ets:member(?CHAN_LIVE_TAB, ChanPid);
@@ -740,48 +755,41 @@ wrap_rpc(Result) ->
     end.
 
 %% @private
-cast(Msg) -> gen_server:cast(?CM, Msg).
+cast(Msg) ->
+    _ = erlang:send(?CM, Msg),
+    ok.
 
 %%--------------------------------------------------------------------
 %% gen_server callbacks
 %%--------------------------------------------------------------------
 
 init([]) ->
+    process_flag(priority, high),
+    process_flag(message_queue_data, off_heap),
     TabOpts = [public, {write_concurrency, true}],
     ok = emqx_utils_ets:new(?CHAN_TAB, [bag, {read_concurrency, true} | TabOpts]),
-    ok = emqx_utils_ets:new(?CHAN_CONN_TAB, [bag | TabOpts]),
+    ok = emqx_utils_ets:new(?CHAN_CONN_TAB, [ordered_set, {keypos, #chan_conn.pid} | TabOpts]),
     ok = emqx_utils_ets:new(?CHAN_INFO_TAB, [ordered_set, compressed | TabOpts]),
-    ok = emqx_utils_ets:new(?CHAN_LIVE_TAB, [ordered_set, {write_concurrency, true} | TabOpts]),
+    ok = emqx_utils_ets:new(?CHAN_LIVE_TAB, [ordered_set | TabOpts]),
     ok = emqx_stats:update_interval(chan_stats, fun ?MODULE:stats_fun/0),
-    State = #{chan_pmon => emqx_pmon:new()},
-    {ok, State}.
+    {ok, #{}}.
 
 handle_call(Req, _From, State) ->
-    ?SLOG(error, #{msg => "unexpected_call", call => Req}),
+    ?SLOG(error, #{msg => "emqx_cm_unexpected_call", call => Req}),
     {reply, ignored, State}.
 
-handle_cast({registered, {ClientId, ChanPid}}, State = #{chan_pmon := PMon}) ->
-    PMon1 = emqx_pmon:monitor(ChanPid, ClientId, PMon),
-    {noreply, State#{chan_pmon := PMon1}};
 handle_cast(Msg, State) ->
-    ?SLOG(error, #{msg => "unexpected_cast", cast => Msg}),
+    ?SLOG(error, #{msg => "emqx_cm_unexpected_cast", cast => Msg}),
     {noreply, State}.
 
-handle_info({'DOWN', _MRef, process, Pid, _Reason}, State = #{chan_pmon := PMon}) ->
-    ?tp(emqx_cm_process_down, #{stale_pid => Pid, reason => _Reason}),
-    BatchSize = emqx:get_config([node, channel_cleanup_batch_size], ?BATCH_SIZE),
-    ChanPids = [Pid | emqx_utils:drain_down(BatchSize)],
-    {Items, PMon1} = emqx_pmon:erase_all(ChanPids, PMon),
-    lists:foreach(fun mark_channel_disconnected/1, ChanPids),
-    ok = emqx_pool:async_submit_to_pool(
-        ?CM_POOL,
-        fun lists:foreach/2,
-        [fun ?MODULE:clean_down/1, Items]
-    ),
-    {noreply, State#{chan_pmon := PMon1}};
+handle_info({registered, Pid}, State) ->
+    ok = collect_and_handle([Pid], []),
+    {noreply, State};
+handle_info({'DOWN', _MRef, process, Pid, _Reason}, State) ->
+    ok = collect_and_handle([], [Pid]),
+    {noreply, State};
 handle_info(Info, State) ->
-    ?SLOG(error, #{msg => "unexpected_info", info => Info}),
-
+    ?SLOG(error, #{msg => "emqx_cm_unexpected_info", info => Info}),
     {noreply, State}.
 
 terminate(_Reason, _State) ->
@@ -794,7 +802,46 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal functions
 %%--------------------------------------------------------------------
 
-clean_down({ChanPid, ClientId}) ->
+handle_reg_pids(Pids) ->
+    lists:foreach(fun(Pid) -> _ = erlang:monitor(process, Pid) end, Pids).
+
+handle_down_pids(Pids) ->
+    lists:foreach(fun mark_channel_disconnected/1, Pids),
+    ok = emqx_pool:async_submit_to_pool(?CM_POOL, fun ?MODULE:clean_down/1, [Pids]).
+
+collect_and_handle(Regs0, Down0) ->
+    BatchSize = emqx:get_config([node, channel_cleanup_batch_size], ?BATCH_SIZE),
+    {Regs, Down} = collect_msgs(Regs0, Down0, BatchSize),
+    ok = handle_reg_pids(Regs),
+    ok = handle_down_pids(Down).
+
+collect_msgs(Regs, Down, 0) ->
+    {Regs, Down};
+collect_msgs(Regs, Down, N) ->
+    receive
+        {registered, Pid} ->
+            collect_msgs([Pid | Regs], Down, N - 1);
+        {'DOWN', _MRef, process, Pid, _Reason} ->
+            collect_msgs(Regs, [Pid | Down], N - 1)
+    after 0 ->
+        {Regs, Down}
+    end.
+
+clean_down([]) ->
+    ok;
+clean_down([Pid | Pids]) ->
+    ok = clean_down(Pid),
+    clean_down(Pids);
+clean_down(Pid) when is_pid(Pid) ->
+    try ets:lookup_element(?CHAN_CONN_TAB, Pid, #chan_conn.clientid) of
+        ClientId ->
+            do_clean_down(ClientId, Pid)
+    catch
+        error:badarg ->
+            ok
+    end.
+
+do_clean_down(ClientId, ChanPid) ->
     try
         do_unregister_channel({ClientId, ChanPid})
     catch
@@ -811,13 +858,14 @@ update_stats({Tab, Stat, MaxStat}) ->
         Size -> emqx_stats:setstat(Stat, MaxStat, Size)
     end.
 
+%% This function is mostly called locally, but also exported for RPC (from older versions).
+%% The first arg ClientId is no longer used since 5.8.5, but the function is still `/2`
+%% for backward compatibility.
 -spec do_get_chann_conn_mod(emqx_types:clientid(), chan_pid()) ->
     module() | undefined.
-do_get_chann_conn_mod(ClientId, ChanPid) ->
-    Chan = {ClientId, ChanPid},
+do_get_chann_conn_mod(_ClientId, ChanPid) ->
     try
-        [ConnMod] = ets:lookup_element(?CHAN_CONN_TAB, Chan, 2),
-        ConnMod
+        ets:lookup_element(?CHAN_CONN_TAB, ChanPid, #chan_conn.mod)
     catch
         error:badarg -> undefined
     end.
@@ -832,6 +880,14 @@ mark_channel_disconnected(ChanPid) ->
     ets:delete(?CHAN_LIVE_TAB, ChanPid),
     ?tp(emqx_cm_connected_client_count_dec_done, #{chan_pid => ChanPid}),
     ok.
+
+%% @doc This function counts the sessions (channels) table but not the live-channel table.
+%% Meaning it includes the disconnected sessions (channels at disconnected state).
+get_sessions_count() ->
+    case ets:info(?CHAN_TAB, size) of
+        undefined -> 0;
+        Size -> Size
+    end.
 
 get_connected_client_count() ->
     case ets:info(?CHAN_LIVE_TAB, size) of
@@ -854,56 +910,3 @@ kick_session_chans(ClientId, ChanPids) ->
             ok
     end,
     lists:foreach(fun(Pid) -> kick_session(ClientId, Pid) end, ChanPids).
-
--if(?EMQX_RELEASE_EDITION == ee).
-
-basic_trace_attrs(Pid) ->
-    %% io:format("lookup_client({chan_pid, Pid}): ~p", [lookup_client({chan_pid, Pid})]),
-    case lookup_client({chan_pid, Pid}) of
-        [] ->
-            #{'channel.pid' => iolist_to_binary(io_lib:format("~p", [Pid]))};
-        [{_Chan, #{clientinfo := ClientInfo, conninfo := ConnInfo}, _Stats}] ->
-            #{
-                'client.clientid' => maps:get(clientid, ClientInfo, undefined),
-                'client.username' => maps:get(username, ClientInfo, undefined),
-                'client.proto_name' => maps:get(proto_name, ConnInfo, undefined),
-                'client.proto_ver' => maps:get(proto_ver, ConnInfo, undefined),
-                'client.is_bridge' => maps:get(is_bridge, ClientInfo, undefined),
-                'client.sockname' => ntoa(maps:get(sockname, ConnInfo, undefined)),
-                'client.peername' => ntoa(maps:get(peername, ConnInfo, undefined))
-            };
-        _ ->
-            #{}
-    end.
-
-action_to_reason(Action) when
-    Action =:= kick orelse
-        Action =:= takeover_kick
-->
-    #{
-        'client.disconnect.reason_code' => ?RC_ADMINISTRATIVE_ACTION,
-        'client.disconnect.reason' => kick
-    };
-action_to_reason(discard) ->
-    #{
-        'client.disconnect.reason_code' => ?RC_SESSION_TAKEN_OVER,
-        'client.disconnect.reason' => discard
-    };
-action_to_reason({takeover, 'begin'}) ->
-    #{
-        'client.disconnect.reason_code' => ?RC_SESSION_TAKEN_OVER,
-        'client.disconnect.reason' => takeover_begin
-    };
-action_to_reason({takeover, 'end'}) ->
-    #{
-        'client.disconnect.reason_code' => ?RC_SESSION_TAKEN_OVER,
-        'disconnect.reason' => takeover_end
-    }.
-
-ntoa(undefined) ->
-    undefined;
-ntoa(IpPort) ->
-    emqx_utils:ntoa(IpPort).
-
--else.
--endif.

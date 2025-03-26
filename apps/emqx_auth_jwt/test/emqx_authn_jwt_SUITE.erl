@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
 -include_lib("emqx/include/asserts.hrl").
+-include_lib("public_key/include/public_key.hrl").
 
 -define(AUTHN_ID, <<"mechanism:jwt">>).
 
@@ -502,6 +503,106 @@ t_jwks_custom_headers(_Config) ->
     ),
     ok.
 
+%% @doc verify that the authenticator state is actually updated when we update its config
+t_jwks_config_update(_Config) ->
+    {ok, _} = emqx_authn_http_test_server:start_link(?JWKS_PORT, ?JWKS_PATH, server_ssl_opts()),
+    ok = emqx_authn_http_test_server:set_handler(fun jwks_handler/2),
+
+    PrivateKey = test_rsa_key(private),
+    Payload0 = #{<<"username">> => <<"myuser">>},
+    JWS0 = generate_jws('public-key', Payload0, PrivateKey),
+    Credential = #{
+        username => <<"myuser">>,
+        password => JWS0
+    },
+    Config = #{
+        mechanism => jwt,
+        %% That is wrong
+        from => username,
+        acl_claim_name => <<"acl">>,
+        ssl => client_ssl_opts(),
+        verify_claims => [],
+        disconnect_after_expire => false,
+        use_jwks => true,
+        endpoint => "https://127.0.0.1:" ++ integer_to_list(?JWKS_PORT + 1) ++ ?JWKS_PATH,
+        headers => #{<<"Accept">> => <<"application/json">>},
+        refresh_interval => 1000,
+        pool_size => 1
+    },
+
+    %% Wait till the jwks are ready
+    ok = snabbkaffe:start_trace(),
+    {{ok, State0}, _} = ?wait_async_action(
+        emqx_authn_jwt:create(?AUTHN_ID, Config),
+        #{?snk_kind := jwks_endpoint_response},
+        10000
+    ),
+    ok = snabbkaffe:stop(),
+
+    %% The authentication should fail, because the `from` is set to `username` in settings
+    ?assertEqual(ignore, emqx_authn_jwt:authenticate(Credential, State0)),
+
+    %% Fix from field in the config
+    ok = snabbkaffe:start_trace(),
+    {{ok, State1}, _} = ?wait_async_action(
+        emqx_authn_jwt:update(
+            Config#{
+                from => password,
+                endpoint => "https://127.0.0.1:" ++ integer_to_list(?JWKS_PORT) ++ ?JWKS_PATH
+            },
+            State0
+        ),
+        #{?snk_kind := jwks_endpoint_response},
+        10000
+    ),
+    ok = snabbkaffe:stop(),
+
+    %% The authentication should be correctly updated
+    %% and authenticate the request
+    ?assertMatch({ok, #{is_superuser := false}}, emqx_authn_jwt:authenticate(Credential, State1)),
+    ok = emqx_authn_http_test_server:stop().
+
+%% Verifies that we correctly set the `customize_hostname_check' TLS option, so that we
+%% may connect to servers whose certificate uses wildcards.
+%% See also: https://github.com/emqx/emqx/issues/14842
+t_jwks_verify_hostname(Config) ->
+    PrivateKey = test_rsa_key(private),
+    Payload0 = #{<<"username">> => <<"myuser">>},
+    SSLOpts = maps:merge(
+        client_ssl_opts(),
+        #{
+            cacertfile => system_cacerts_bundle_path(Config),
+            server_name_indication => <<"www.googleapis.com">>
+        }
+    ),
+    ResConfig = #{
+        mechanism => jwt,
+        %% That is wrong
+        from => username,
+        acl_claim_name => <<"acl">>,
+        ssl => SSLOpts,
+        verify_claims => [],
+        disconnect_after_expire => false,
+        use_jwks => true,
+        endpoint => <<"https://www.googleapis.com/oauth2/v3/certs">>,
+        headers => #{<<"Accept">> => <<"application/json">>},
+        refresh_interval => 1000,
+        pool_size => 1
+    },
+
+    %% Wait till the jwks are ready
+    ok = snabbkaffe:start_trace(),
+    {{ok, _State0}, {ok, #{response := Response}}} = ?wait_async_action(
+        emqx_authn_jwt:create(?AUTHN_ID, ResConfig),
+        #{?snk_kind := jwks_endpoint_response},
+        10_000
+    ),
+    ok = snabbkaffe:stop(),
+
+    ?assertMatch({{_, 200, _}, _, _}, Response),
+
+    ok.
+
 t_verify_claims(_) ->
     Secret = <<"abcdef">>,
     Config0 = #{
@@ -813,3 +914,22 @@ server_ssl_opts() ->
         {cacertfile, cert_file("ca.crt")},
         {verify, verify_none}
     ].
+
+system_cacerts_bundle_path(TCConfig) ->
+    DefaultPath = <<"/etc/ssl/certs/ca-certificates.crt">>,
+    case file:read_file(DefaultPath) of
+        {ok, <<"-----BEGIN", _/binary>>} ->
+            DefaultPath;
+        _ ->
+            PrivDir = ?config(priv_dir, TCConfig),
+            OutPath = filename:join(PrivDir, "ca-certificates.crt"),
+            Cacerts0 = public_key:cacerts_get(),
+            Cacerts = lists:map(
+                fun(#cert{der = DER}) ->
+                    {'Certificate', DER, not_encrypted}
+                end,
+                Cacerts0
+            ),
+            ok = file:write_file(OutPath, public_key:pem_encode(Cacerts)),
+            OutPath
+    end.

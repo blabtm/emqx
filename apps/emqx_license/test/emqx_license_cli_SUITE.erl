@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_license_cli_SUITE).
@@ -70,8 +70,12 @@ t_conf_update(_Config) ->
         },
         emqx:get_config([license])
     ),
+    Dump = maps:from_list(emqx_license_checker:dump()),
     ?assertMatch(
-        #{max_connections := 123},
-        maps:from_list(emqx_license_checker:dump())
+        #{
+            max_connections := 123,
+            max_sessions := 123
+        },
+        Dump
     ),
     ok.

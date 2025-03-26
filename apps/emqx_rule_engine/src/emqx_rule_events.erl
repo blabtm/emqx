@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -36,6 +36,8 @@
 ]).
 
 -export([
+    on_alarm_activated/2,
+    on_alarm_deactivated/2,
     on_client_connected/3,
     on_client_disconnected/4,
     on_client_connack/4,
@@ -71,6 +73,8 @@
 
 event_names() ->
     [
+        'alarm.activated',
+        'alarm.deactivated',
         'client.connected',
         'client.disconnected',
         'client.connack',
@@ -89,6 +93,8 @@ event_names() ->
 %% for documentation purposes
 event_topics_enum() ->
     [
+        '$events/sys/alarm_activated',
+        '$events/sys/alarm_deactivated',
         '$events/client_connected',
         '$events/client_disconnected',
         '$events/client_connack',
@@ -134,6 +140,21 @@ unload(Topic) ->
 %%--------------------------------------------------------------------
 %% Callbacks
 %%--------------------------------------------------------------------
+
+on_alarm_activated(AlarmActivatedContext, Conf) ->
+    apply_event(
+        'alarm.activated',
+        fun() -> eventmsg_alarm_activated(AlarmActivatedContext) end,
+        Conf
+    ).
+
+on_alarm_deactivated(AlarmDeactivatedContext, Conf) ->
+    apply_event(
+        'alarm.deactivated',
+        fun() -> eventmsg_alarm_deactivated(AlarmDeactivatedContext) end,
+        Conf
+    ).
+
 on_message_publish(Message = #message{topic = Topic}, _Conf) ->
     case ignore_sys_message(Message) of
         true ->
@@ -340,6 +361,44 @@ eventmsg_publish(
         #{headers => Headers}
     ).
 
+eventmsg_alarm_activated(AlarmActivatedContext) ->
+    #{
+        name := Name,
+        details := Details,
+        message := Message,
+        activated_at := ActivatedAt
+    } = AlarmActivatedContext,
+    with_basic_columns(
+        'alarm.activated',
+        #{
+            name => Name,
+            details => Details,
+            message => Message,
+            activated_at => ActivatedAt
+        },
+        #{}
+    ).
+
+eventmsg_alarm_deactivated(AlarmDectivatedContext) ->
+    #{
+        name := Name,
+        details := Details,
+        message := Message,
+        activated_at := ActivatedAt,
+        deactivated_at := DeactivatedAt
+    } = AlarmDectivatedContext,
+    with_basic_columns(
+        'alarm.deactivated',
+        #{
+            name => Name,
+            details => Details,
+            message => Message,
+            activated_at => ActivatedAt,
+            deactivated_at => DeactivatedAt
+        },
+        #{}
+    ).
+
 eventmsg_connected(
     ClientInfo = #{
         clientid := ClientId,
@@ -392,7 +451,8 @@ eventmsg_disconnected(
         sockname := SockName,
         proto_name := ProtoName,
         proto_ver := ProtoVer,
-        disconnected_at := DisconnectedAt
+        disconnected_at := DisconnectedAt,
+        connected_at := ConnectedAt
     },
     Reason
 ) ->
@@ -408,6 +468,7 @@ eventmsg_disconnected(
             proto_ver => ProtoVer,
             disconn_props => printable_maps(maps:get(disconn_props, ConnInfo, #{})),
             disconnected_at => DisconnectedAt,
+            connected_at => ConnectedAt,
             client_attrs => maps:get(client_attrs, ClientInfo, #{})
         },
         #{}
@@ -780,6 +841,8 @@ columns(Event) ->
 event_info() ->
     [
         event_info_message_publish(),
+        event_info_alarm_activated(),
+        event_info_alarm_deactivated(),
         event_info_message_deliver(),
         event_info_message_acked(),
         event_info_message_dropped(),
@@ -829,6 +892,20 @@ event_info_message_publish() ->
         {<<"message publish">>, <<"消息发布"/utf8>>},
         <<"SELECT payload.msg as msg FROM \"t/#\" WHERE msg = 'hello'">>
     ).
+event_info_alarm_activated() ->
+    event_info_common(
+        'alarm.activated',
+        {<<"alarm activated">>, <<""/utf8>>},
+        {<<"alarm activated">>, <<""/utf8>>},
+        <<"SELECT * FROM \"$events/sys/alarm_activated\" ">>
+    ).
+event_info_alarm_deactivated() ->
+    event_info_common(
+        'alarm.deactivated',
+        {<<"alarm deactivated">>, <<""/utf8>>},
+        {<<"alarm deactivated">>, <<""/utf8>>},
+        <<"SELECT * FROM \"$events/sys/alarm_deactivated\" ">>
+    ).
 event_info_message_deliver() ->
     event_info_common(
         'message.delivered',
@@ -871,7 +948,7 @@ event_info_client_disconnected() ->
         'client.disconnected',
         {<<"client disconnected">>, <<"连接断开"/utf8>>},
         {<<"client disconnected">>, <<"连接断开"/utf8>>},
-        <<"SELECT * FROM \"$events/client_disconnected\" WHERE topic =~ 't/#'">>
+        <<"SELECT * FROM \"$events/client_disconnected\"">>
     ).
 event_info_client_connack() ->
     event_info_common(
@@ -936,6 +1013,21 @@ test_columns('message.publish') ->
         {<<"topic">>, [<<"t/a">>, <<"the topic of the MQTT message">>]},
         {<<"qos">>, [1, <<"the QoS of the MQTT message">>]},
         {<<"payload">>, [<<"{\"msg\": \"hello\"}">>, <<"the payload of the MQTT message">>]}
+    ];
+test_columns('alarm.activated') ->
+    [
+        {<<"name">>, [<<"alarm_name">>, <<"name of the alarm">>]},
+        {<<"details">>, [#{<<"extra">> => <<"details">>}, <<"details about the alarm">>]},
+        {<<"message">>, [<<"something is wrong">>, <<"message accompanying alarm">>]},
+        {<<"activated_at">>, [1736512728666, <<"time at which alarm went off">>]}
+    ];
+test_columns('alarm.deactivated') ->
+    [
+        {<<"name">>, [<<"alarm_name">>, <<"name of the alarm">>]},
+        {<<"details">>, [#{<<"extra">> => <<"details">>}, <<"details about the alarm">>]},
+        {<<"message">>, [<<"something is wrong">>, <<"message accompanying alarm">>]},
+        {<<"activated_at">>, [1736512728666, <<"time at which alarm went off">>]},
+        {<<"deactivated_at">>, [1736512728999, <<"time at which alarm was deactivated">>]}
     ];
 test_columns('delivery.dropped') ->
     [{<<"reason">>, [<<"queue_full">>, <<"the reason of dropping">>]}] ++
@@ -1036,6 +1128,23 @@ columns_with_exam('message.publish') ->
         {<<"timestamp">>, erlang:system_time(millisecond)},
         {<<"node">>, node()},
         columns_example_client_attrs()
+    ];
+columns_with_exam('alarm.activated') ->
+    [
+        {<<"event">>, 'alarm.activated'},
+        {<<"name">>, <<"alarm_name">>},
+        {<<"details">>, #{<<"extra">> => <<"details">>}},
+        {<<"message">>, <<"something is wrong">>},
+        {<<"activated_at">>, 1736512728666}
+    ];
+columns_with_exam('alarm.deactivated') ->
+    [
+        {<<"event">>, 'alarm.deactivated'},
+        {<<"name">>, <<"alarm_name">>},
+        {<<"details">>, #{<<"extra">> => <<"details">>}},
+        {<<"message">>, <<"something is wrong">>},
+        {<<"activated_at">>, 1736512728666},
+        {<<"deactivated_at">>, 1736512728999}
     ];
 columns_with_exam('message.delivered') ->
     columns_message_ack_delivered('message.delivered');
@@ -1146,6 +1255,7 @@ columns_with_exam('client.disconnected') ->
         {<<"proto_name">>, <<"MQTT">>},
         {<<"proto_ver">>, 5},
         columns_example_props(disconn_props),
+        {<<"connected_at">>, erlang:system_time(millisecond)},
         {<<"disconnected_at">>, erlang:system_time(millisecond)},
         {<<"timestamp">>, erlang:system_time(millisecond)},
         {<<"node">>, node()},
@@ -1303,6 +1413,8 @@ hook_fun_name(HookPoint) ->
 
 %% return static function references to help static code checks
 hook_fun(?BRIDGE_HOOKPOINT(_)) -> fun ?MODULE:on_bridge_message_received/2;
+hook_fun('alarm.activated') -> fun ?MODULE:on_alarm_activated/2;
+hook_fun('alarm.deactivated') -> fun ?MODULE:on_alarm_deactivated/2;
 hook_fun('client.connected') -> fun ?MODULE:on_client_connected/3;
 hook_fun('client.disconnected') -> fun ?MODULE:on_client_disconnected/4;
 hook_fun('client.connack') -> fun ?MODULE:on_client_connack/4;
@@ -1340,6 +1452,8 @@ ntoa(IpOrIpPort) ->
     iolist_to_binary(emqx_utils:ntoa(IpOrIpPort)).
 
 event_name(?BRIDGE_HOOKPOINT(_) = Bridge) -> Bridge;
+event_name(<<"$events/sys/alarm_activated">>) -> 'alarm.activated';
+event_name(<<"$events/sys/alarm_deactivated">>) -> 'alarm.deactivated';
 event_name(<<"$events/client_connected">>) -> 'client.connected';
 event_name(<<"$events/client_disconnected">>) -> 'client.disconnected';
 event_name(<<"$events/client_connack">>) -> 'client.connack';
@@ -1356,6 +1470,8 @@ event_name(<<"$events/delivery_dropped">>) -> 'delivery.dropped';
 event_name(_) -> 'message.publish'.
 
 event_topic(?BRIDGE_HOOKPOINT(_) = Bridge) -> Bridge;
+event_topic('alarm.activated') -> <<"$events/sys/alarm_activated">>;
+event_topic('alarm.deactivated') -> <<"$events/sys/alarm_deactivated">>;
 event_topic('client.connected') -> <<"$events/client_connected">>;
 event_topic('client.disconnected') -> <<"$events/client_disconnected">>;
 event_topic('client.connack') -> <<"$events/client_connack">>;

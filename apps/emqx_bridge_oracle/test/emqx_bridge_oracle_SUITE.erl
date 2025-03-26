@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 -module(emqx_bridge_oracle_SUITE).
 
@@ -127,6 +127,8 @@ common_init_per_testcase(TestCase, Config0) ->
     ),
     ok = snabbkaffe:start_trace(),
     [
+        {bridge_type, ?BRIDGE_TYPE_BIN},
+        {bridge_name, Name},
         {oracle_name, Name},
         {oracle_config_string, ConfigString},
         {oracle_config, OracleConfig}
@@ -165,6 +167,12 @@ sql_insert_template_for_bridge() ->
 
 sql_insert_template_with_nested_token_for_bridge() ->
     "INSERT INTO mqtt_test(topic, msgid, payload, retain) VALUES (${topic}, ${id}, ${payload.msg}, ${retain})".
+
+sql_insert_template_with_large_value() ->
+    "INSERT INTO mqtt_test(topic, msgid, payload, retain) VALUES (${topic}, ${id}, ${payload}, ${id})".
+
+sql_insert_template_with_null_value() ->
+    "INSERT INTO mqtt_test(topic, msgid, payload, retain) VALUES (${topic}, ${id}, ${payload.nullkey}, ${retain})".
 
 sql_insert_template_with_inconsistent_datatype() ->
     "INSERT INTO mqtt_test(topic, msgid, payload, retain) VALUES (${topic}, ${id}, ${payload}, ${flags})".
@@ -599,6 +607,13 @@ t_probe_with_nested_tokens(Config) ->
     ),
     ?assertMatch({ok, {{_, 204, _}, _Headers, _Body}}, ProbeRes0).
 
+t_probe_with_large_value(Config) ->
+    ProbeRes0 = probe_bridge_api(
+        Config,
+        #{<<"sql">> => sql_insert_template_with_large_value()}
+    ),
+    ?assertMatch({ok, {{_, 204, _}, _Headers, _Body}}, ProbeRes0).
+
 t_message_with_nested_tokens(Config) ->
     BridgeId = bridge_id(Config),
     ResourceId = resource_id(Config),
@@ -642,6 +657,56 @@ t_message_with_nested_tokens(Config) ->
         _Attempts = 20,
         ?assertMatch(
             {ok, [{result_set, [<<"PAYLOAD">>], _, [[Data]]}]},
+            emqx_resource:simple_sync_query(
+                ResourceId, {query, "SELECT payload FROM mqtt_test"}
+            )
+        )
+    ),
+    ok.
+
+t_message_with_null_value(Config) ->
+    BridgeId = bridge_id(Config),
+    ResourceId = resource_id(Config),
+    Name = ?config(oracle_name, Config),
+    reset_table(Config),
+    ?assertMatch(
+        {ok, _},
+        create_bridge(Config, #{
+            <<"sql">> => sql_insert_template_with_null_value()
+        })
+    ),
+    %% Since the connection process is async, we give it some time to
+    %% stabilize and avoid flakiness.
+    ?retry(
+        _Sleep = 1_000,
+        _Attempts = 20,
+        ?assertEqual({ok, connected}, emqx_resource_manager:health_check(ResourceId))
+    ),
+    ?retry(
+        _Sleep = 1_000,
+        _Attempts = 20,
+        ?assertMatch(
+            #{status := connected},
+            emqx_bridge_v2:health_check(
+                ?BRIDGE_TYPE_BIN,
+                Name
+            )
+        )
+    ),
+    MsgId = erlang:unique_integer(),
+    %% no nullkey in payload
+    Params = #{
+        topic => ?config(mqtt_topic, Config),
+        id => MsgId,
+        payload => emqx_utils_json:encode(#{}),
+        retain => false
+    },
+    emqx_bridge:send_message(BridgeId, Params),
+    ?retry(
+        _Sleep = 1_000,
+        _Attempts = 20,
+        ?assertMatch(
+            {ok, [{result_set, [<<"PAYLOAD">>], _, [[null]]}]},
             emqx_resource:simple_sync_query(
                 ResourceId, {query, "SELECT payload FROM mqtt_test"}
             )
@@ -730,18 +795,20 @@ t_no_sid_nor_service_name(Config0) ->
     ok.
 
 t_missing_table(Config) ->
-    ResourceId = resource_id(Config),
+    Name = ?config(bridge_name, Config),
     ?check_trace(
         begin
             drop_table_if_exists(Config),
             ?assertMatch({ok, _}, create_bridge_api(Config)),
-            ActionId = emqx_bridge_v2:id(?BRIDGE_TYPE_BIN, ?config(oracle_name, Config)),
             ?retry(
                 _Sleep = 1_000,
                 _Attempts = 20,
                 ?assertMatch(
-                    {ok, Status} when Status =:= disconnected orelse Status =:= connecting,
-                    emqx_resource_manager:health_check(ResourceId)
+                    {ok, #{
+                        <<"status">> := <<"disconnected">>,
+                        <<"status_reason">> := <<"{unhealthy_target,", _/binary>>
+                    }},
+                    emqx_bridge_testlib:get_bridge_api(Config)
                 )
             ),
             ?block_until(#{?snk_kind := oracle_undefined_table}),
@@ -752,10 +819,9 @@ t_missing_table(Config) ->
                 payload => ?config(oracle_name, Config),
                 retain => true
             },
-            Message = {ActionId, Params},
             ?assertMatch(
-                {error, {resource_error, #{reason := not_connected}}},
-                emqx_resource:simple_sync_query(ResourceId, Message)
+                {error, {resource_error, #{reason := unhealthy_target}}},
+                emqx_bridge_v2:send_message(?BRIDGE_TYPE_BIN, Name, Params, _QueryOpts = #{})
             ),
             ok
         end,
@@ -786,9 +852,16 @@ t_table_removed(Config) ->
                 retain => true
             },
             Message = {ActionId, Params},
-            ?assertEqual(
-                {error, {unrecoverable_error, {942, "ORA-00942: table or view does not exist\n"}}},
-                emqx_resource:simple_sync_query(ResourceId, Message)
+            %% Sometimes, this may fail with "ORA-01013: user requested cancel of current
+            %% operation", probably due to unknown race condition.
+            ?retry(
+                200,
+                10,
+                ?assertEqual(
+                    {error,
+                        {unrecoverable_error, {942, "ORA-00942: table or view does not exist\n"}}},
+                    emqx_resource:simple_sync_query(ResourceId, Message)
+                )
             ),
             ok
         end,

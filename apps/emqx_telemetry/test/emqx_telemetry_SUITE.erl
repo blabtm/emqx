@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -611,15 +611,15 @@ mock_httpc() ->
     ).
 
 mock_advanced_mqtt_features() ->
-    Context = emqx_retainer:context(),
     lists:foreach(
         fun(N) ->
             Num = integer_to_binary(N),
             Message = emqx_message:make(<<"retained/", Num/binary>>, <<"payload">>),
-            ok = emqx_retainer:store_retained(Context, Message)
+            ok = emqx_retainer_publisher:store_retained(Message)
         end,
         lists:seq(1, 5)
     ),
+    ct:sleep(100),
 
     lists:foreach(
         fun(N) ->
@@ -812,7 +812,7 @@ stop_peer(Node) ->
     ok = application:start(mria).
 
 leave_cluster() ->
-    try mnesia_hook:module_info() of
+    try mnesia_hook:module_info(module) of
         _ -> ekka:leave()
     catch
         _:_ ->

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_bridge_rabbitmq_connector).
@@ -55,6 +55,10 @@ roots() ->
 fields(config) ->
     emqx_bridge_rabbitmq_connector_schema:fields(connector) ++
         emqx_bridge_rabbitmq_pubsub_schema:fields(action_parameters).
+
+-define(GET_STATUS_TIMEOUT, 10_000).
+%% Less than ?T_OPERATION of emqx_resource_manager
+-define(CHANNEL_CLOSE_TIMEOUT, 4_000).
 
 %% ===================================================================
 %% Callbacks defined in emqx_resource
@@ -178,32 +182,49 @@ connect(Options) ->
     end.
 
 -spec on_get_status(resource_id(), term()) ->
-    {connected, resource_state()} | {disconnected, resource_state(), binary()}.
-on_get_status(PoolName, #{channels := Channels} = State) ->
+    ?status_connected | {?status_disconnected, binary()}.
+on_get_status(PoolName, #{channels := Channels}) ->
     ChannelNum = maps:size(Channels),
     Conns = get_rabbitmq_connections(PoolName),
-    Check =
-        lists:all(
-            fun(Conn) ->
-                [{num_channels, ActualNum}] = amqp_connection:info(Conn, [num_channels]),
-                ChannelNum >= ActualNum
-            end,
-            Conns
-        ),
-    case Check andalso Conns =/= [] of
-        true -> {connected, State};
-        false -> {disconnected, State, <<"not_connected">>}
+    try actual_channel_nums(Conns) of
+        ActualNums ->
+            Check = lists:all(fun(ActualNum) -> ActualNum >= ChannelNum end, ActualNums),
+            case Check of
+                true when Conns =/= [] ->
+                    ?status_connected;
+                _ ->
+                    {?status_disconnected, <<"not_connected">>}
+            end
+    catch
+        Error:Reason ->
+            ?SLOG(error, #{
+                msg => "rabbitmq_connector_get_status_failed",
+                connector => PoolName,
+                error => Error,
+                reason => Reason
+            }),
+            {?status_disconnected, <<"not_connected">>}
     end.
+
+actual_channel_nums(Conns) ->
+    emqx_utils:pmap(
+        fun(Conn) ->
+            [{num_channels, ActualNum}] = amqp_connection:info(Conn, [num_channels]),
+            ActualNum
+        end,
+        Conns,
+        ?GET_STATUS_TIMEOUT
+    ).
 
 on_get_channel_status(_InstanceId, ChannelId, #{channels := Channels}) ->
     case emqx_utils_maps:deep_find([ChannelId, rabbitmq], Channels) of
         {ok, RabbitMQ} ->
             case lists:all(fun is_process_alive/1, maps:values(RabbitMQ)) of
-                true -> connected;
-                false -> {error, not_connected}
+                true -> ?status_connected;
+                false -> {?status_disconnected, not_connected}
             end;
         _ ->
-            {error, not_exists}
+            ?status_disconnected
     end.
 
 on_query(ResourceID, {ChannelId, Data} = MsgReq, State) ->
@@ -522,8 +543,17 @@ try_subscribe(#{config_root := actions}, _RabbitChan, _ChannelId) ->
 try_unsubscribe(ChannelId, Channels) ->
     case emqx_utils_maps:deep_find([ChannelId, rabbitmq], Channels) of
         {ok, RabbitMQ} ->
-            lists:foreach(fun(Pid) -> catch amqp_channel:close(Pid) end, maps:values(RabbitMQ)),
-            emqx_bridge_rabbitmq_sup:ensure_deleted(ChannelId);
+            Pids = maps:values(RabbitMQ),
+            ok = close_channels(Pids),
+            _ = emqx_bridge_rabbitmq_sup:ensure_deleted(ChannelId),
+            ok;
         _ ->
             ok
     end.
+
+close_channels(Pids) ->
+    _ =
+        catch emqx_utils:pforeach(
+            fun(Pid) -> amqp_channel:close(Pid) end, Pids, ?CHANNEL_CLOSE_TIMEOUT
+        ),
+    ok.

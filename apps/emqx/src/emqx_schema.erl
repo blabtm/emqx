@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2017-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2017-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -29,7 +29,7 @@
 -include_lib("hocon/include/hoconsc.hrl").
 -include_lib("logger.hrl").
 
--define(MAX_INT_MQTT_PACKET_SIZE, 268435456).
+-define(MAX_INT_MQTT_PACKET_SIZE, 268435455).
 -define(MAX_INT_TIMEOUT_MS, 4294967295).
 %% floor(?MAX_INT_TIMEOUT_MS / 1000).
 -define(MAX_INT_TIMEOUT_S, 4294967).
@@ -92,10 +92,12 @@
 
 -export([
     validate_heap_size/1,
-    validate_packet_size/1,
+    validate_max_packet_size/1,
+    convert_max_packet_size/2,
     user_lookup_fun_tr/2,
     validate_keepalive_multiplier/1,
     non_empty_string/1,
+    non_empty_array/1,
     validations/0,
     naive_env_interpolation/1,
     ensure_unicode_path/2,
@@ -146,7 +148,7 @@
 ]).
 
 -export([listeners/0]).
--export([mkunion/2, mkunion/3]).
+-export([mkunion/2, mkunion/3, str/1]).
 
 -behaviour(hocon_schema).
 
@@ -221,7 +223,7 @@ roots(high) ->
             )},
         {zones, zones_field_schema()}
     ] ++
-        emqx_schema_hooks:injection_point(
+        emqx_schema_hooks:list_injection_point(
             'roots.high',
             [
                 %% NOTE: authorization schema here is only to keep emqx app pure
@@ -856,6 +858,14 @@ fields("mqtt_quic_listener") ->
                 ?MAX_UINT(16),
                 ?DESC(fields_mqtt_quic_listener_stateless_operation_expiration_ms)
             )},
+        {"sslkeylogfile",
+            sc(
+                string(),
+                #{
+                    desc => ?DESC(fields_mqtt_quic_listener_sslkeylogfile),
+                    importance => ?IMPORTANCE_HIDDEN
+                }
+            )},
         {"ssl_options",
             sc(
                 ref("listener_quic_ssl_opts"),
@@ -1452,6 +1462,22 @@ fields("sysmon") ->
                 %% Userful monitoring solution when benchmarking,
                 %% but hardly common enough for regular users.
                 #{importance => ?IMPORTANCE_HIDDEN}
+            )},
+        {"mnesia_tm_mailbox_size_alarm_threshold",
+            sc(
+                pos_integer(),
+                #{
+                    default => 500,
+                    desc => ?DESC("sysmon_mnesia_tm_mailbox_size_alarm_threshold")
+                }
+            )},
+        {"broker_pool_mailbox_size_alarm_threshold",
+            sc(
+                pos_integer(),
+                #{
+                    default => 500,
+                    desc => ?DESC("sysmon_broker_pool_mailbox_size_alarm_threshold")
+                }
             )}
     ];
 fields("sysmon_vm") ->
@@ -1878,7 +1904,7 @@ mqtt_listener(Bind) ->
                         default => <<"3s">>
                     }
                 )}
-        ] ++ emqx_schema_hooks:injection_point('mqtt.listener').
+        ] ++ emqx_schema_hooks:list_injection_point('mqtt.listener').
 
 access_rules_converter(AccessRules) ->
     DeepRules =
@@ -2296,7 +2322,7 @@ common_ssl_opts_schema(Defaults, Type) ->
                     desc => ?DESC(common_ssl_opts_schema_hibernate_after)
                 }
             )}
-    ] ++ emqx_schema_hooks:injection_point('common_ssl_opts_schema').
+    ] ++ emqx_schema_hooks:list_injection_point('common_ssl_opts_schema').
 
 %% @doc Make schema for SSL listener options.
 -spec server_ssl_opts_schema(map(), boolean()) -> hocon_schema:field_schema().
@@ -2802,31 +2828,37 @@ to_atom(Bin) when is_binary(Bin) ->
     binary_to_atom(Bin, utf8).
 
 validate_heap_size(Siz) when is_integer(Siz) ->
-    MaxSiz =
-        case erlang:system_info(wordsize) of
-            % arch_64
-            8 -> (1 bsl 59) - 1;
-            % arch_32
-            4 -> (1 bsl 27) - 1
-        end,
+    WordSize = erlang:system_info(wordsize),
+    %% 128 GB
+    MaxSiz = (128 * 1024 * 1024 * 1024) div WordSize,
     case Siz > MaxSiz of
         true ->
-            {error, #{reason => max_heap_size_too_large, maximum => MaxSiz}};
+            %% Turn back into bytesize for error message...
+            {error, #{cause => max_heap_size_too_large, maximum => MaxSiz * WordSize}};
         false ->
             ok
     end;
 validate_heap_size(_SizStr) ->
     {error, invalid_heap_size}.
 
-validate_packet_size(Siz) when is_integer(Siz) andalso Siz < 1 ->
-    {error, #{reason => max_mqtt_packet_size_too_small, minimum => 1}};
-validate_packet_size(Siz) when is_integer(Siz) andalso Siz > ?MAX_INT_MQTT_PACKET_SIZE ->
-    Max = integer_to_list(round(?MAX_INT_MQTT_PACKET_SIZE / 1024 / 1024)) ++ "M",
-    {error, #{reason => max_mqtt_packet_size_too_large, maximum => Max}};
-validate_packet_size(Siz) when is_integer(Siz) ->
+validate_max_packet_size(Siz) when is_integer(Siz) andalso Siz < 1 ->
+    {error, #{cause => max_mqtt_packet_size_too_small, minimum => 1}};
+validate_max_packet_size(Siz) when is_integer(Siz) andalso Siz > ?MAX_INT_MQTT_PACKET_SIZE ->
+    {error, #{
+        cause => max_mqtt_packet_size_too_large,
+        maximum => ?MAX_INT_MQTT_PACKET_SIZE
+    }};
+validate_max_packet_size(Siz) when is_integer(Siz) ->
     ok;
-validate_packet_size(_SizStr) ->
+validate_max_packet_size(_SizStr) ->
     {error, invalid_packet_size}.
+
+%% This is for backward compatibility.
+%% We used to allow setting 256MB, but in fact the limit is one byte less.
+convert_max_packet_size(<<"256MB">>, _) ->
+    iolist_to_binary([integer_to_list(?MAX_INT_MQTT_PACKET_SIZE), "B"]);
+convert_max_packet_size(X, _) ->
+    X.
 
 validate_keepalive_multiplier(Multiplier) when
     is_number(Multiplier) andalso Multiplier >= 1.0 andalso Multiplier =< 65535.0
@@ -2971,6 +3003,13 @@ non_empty_string(<<>>) -> {error, empty_string_not_allowed};
 non_empty_string("") -> {error, empty_string_not_allowed};
 non_empty_string(S) when is_binary(S); is_list(S) -> ok;
 non_empty_string(_) -> {error, invalid_string}.
+
+non_empty_array([]) ->
+    {error, empty_array_not_allowed};
+non_empty_array(List) when is_list(List) ->
+    ok;
+non_empty_array(_) ->
+    {error, invalid_data}.
 
 %% @doc Make schema for 'server' or 'servers' field.
 %% for each field, there are three passes:
@@ -3422,7 +3461,8 @@ naive_env_interpolation(Other) ->
     Other.
 
 split_path(Path) ->
-    split_path(Path, []).
+    {Name0, Tail} = split_path(Path, []),
+    {string:trim(Name0, both, "{}"), Tail}.
 
 split_path([], Acc) ->
     {lists:reverse(Acc), []};
@@ -3431,8 +3471,7 @@ split_path([Char | Rest], Acc) when Char =:= $/ orelse Char =:= $\\ ->
 split_path([Char | Rest], Acc) ->
     split_path(Rest, [Char | Acc]).
 
-resolve_env(Name0) ->
-    Name = string:trim(Name0, both, "{}"),
+resolve_env(Name) ->
     Value = os:getenv(Name),
     case Value =/= false andalso Value =/= "" of
         true ->
@@ -3553,7 +3592,8 @@ mqtt_general() ->
                 bytesize(),
                 #{
                     default => <<"1MB">>,
-                    validator => fun ?MODULE:validate_packet_size/1,
+                    validator => fun ?MODULE:validate_max_packet_size/1,
+                    converter => fun ?MODULE:convert_max_packet_size/2,
                     desc => ?DESC(mqtt_max_packet_size)
                 }
             )},

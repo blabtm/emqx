@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -75,6 +75,8 @@
 -export([default_config/2]).
 -export([merge_appspec/2]).
 -export([merge_config/2]).
+
+-export([inhibit_config_loader/2]).
 
 %% "Unofficial" `emqx_config_handler' and `emqx_conf' APIs
 -export([schema_module/0, upgrade_raw_conf/1]).
@@ -475,8 +477,9 @@ stop_apps(Apps) ->
 
 %%
 
-verify_clean_suite_state(#{boot_type := restart}) ->
-    %% when testing node restart, we do not need to verify clean state
+verify_clean_suite_state(#{work_dir_dirty := true}) ->
+    %% Used by `emqx_cth_cluster:restart/1` that implies the work dir is dirty.
+    %% Use with care.
     ok;
 verify_clean_suite_state(#{work_dir := WorkDir}) ->
     {ok, []} = file:list_dir(WorkDir),

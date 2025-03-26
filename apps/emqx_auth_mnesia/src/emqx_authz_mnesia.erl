@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -49,7 +49,6 @@
 
 %% AuthZ Callbacks
 -export([
-    description/0,
     create/1,
     update/1,
     destroy/1,
@@ -89,9 +88,6 @@ create_tables() ->
 %%--------------------------------------------------------------------
 %% emqx_authz callbacks
 %%--------------------------------------------------------------------
-
-description() ->
-    "AuthZ with Mnesia".
 
 create(Source) -> Source.
 

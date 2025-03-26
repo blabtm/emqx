@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -34,6 +34,7 @@
 -define(backup_path(_Config_, _BackupName_),
     filename:join(?config(data_dir, _Config_), _BackupName_)
 ).
+-define(ON(NODE, BODY), erpc:call(NODE, fun() -> BODY end)).
 
 all() ->
     case emqx_cth_suite:skip_if_oss() of
@@ -142,6 +143,49 @@ t_export_cloud(Config) ->
     {ok, _} = import_backup(?NODE1_PORT, Auth, Filepath),
     ok.
 
+%% Simple smoke test for exporting a subset of config root keys and tables via the CLI.
+t_export_cloud_ctl(Config) ->
+    [N1 | _] = ?config(cluster, Config),
+    %% Need to explicitly load the commands because they are loaded by `emqx_machine'...
+    ?ON(N1, emqx_mgmt_cli:load()),
+    ok = ?ON(N1, meck:new(emqx_ctl, [no_link, passthrough])),
+    RootKeys = [
+        <<"connectors">>,
+        <<"actions">>,
+        <<"sources">>,
+        <<"rule_engine">>,
+        <<"schema_registry">>
+    ],
+    TableSets = [
+        <<"banned">>,
+        <<"builtin_authn">>,
+        <<"builtin_authz">>
+    ],
+    RootKeysArg = lists:join($,, RootKeys),
+    TableSetsArg = lists:join($,, TableSets),
+    ?ON(
+        N1,
+        emqx_ctl:run_command([
+            "data", "export", "--root-keys", RootKeysArg, "--table-sets", TableSetsArg
+        ])
+    ),
+    {ok, [BackupFile]} = ?ON(N1, file:list_dir(filename:join([emqx:data_dir(), "backup"]))),
+    ?ON(N1, emqx_ctl:run_command(["data", "import", BackupFile])),
+    History = ?ON(N1, meck:history(emqx_ctl)),
+    ?ON(N1, meck:unload(emqx_ctl)),
+    OutputMsgs = [Fmt || {_Pid, {emqx_ctl, print, [Fmt | _]}, _Res} <- History],
+    ?assertMatch(
+        [_],
+        [1 || "Data has been successfully exported" ++ _ <- OutputMsgs],
+        #{output => OutputMsgs}
+    ),
+    ?assertMatch(
+        [_],
+        [1 || "Data has been imported successfully" ++ _ <- OutputMsgs],
+        #{output => OutputMsgs}
+    ),
+    ok.
+
 %% Checks returned error when one or more invalid table set names are given to the export
 %% request.
 t_export_bad_table_sets(Config) ->
@@ -149,6 +193,17 @@ t_export_bad_table_sets(Config) ->
     Body = #{<<"table_sets">> => [<<"foo">>, <<"bar">>, <<"foo">>]},
     ?assertMatch(
         {400, #{<<"message">> := <<"Invalid table sets: bar, foo">>}},
+        export_backup2(?NODE1_PORT, Auth, Body)
+    ),
+    ok.
+
+%% Checks returned error when one or more invalid root config keys are given to the export
+%% request.
+t_export_bad_root_keys(Config) ->
+    Auth = ?config(auth, Config),
+    Body = #{<<"root_keys">> => [<<"foo">>, <<"bar">>, <<"foo">>]},
+    ?assertMatch(
+        {400, #{<<"message">> := <<"Invalid root keys: bar, foo">>}},
         export_backup2(?NODE1_PORT, Auth, Body)
     ),
     ok.
@@ -184,10 +239,26 @@ test_file_op(Method, Config) ->
             ?NODE2_PORT,
             Auth,
             maps:get(<<"filename">>, Node3Parsed),
-            [{<<"node">>, maps:get(<<"node">>, Node3Parsed)}]
+            [{<<"node">>, maps:get(<<"node">>, Node3Parsed)}],
+            #{return_all => true}
         )
     end,
-    ?assertMatch({ok, _}, F2()),
+    Res2 = F2(),
+    Code2 =
+        case Method of
+            get -> 200;
+            delete -> 204
+        end,
+    ?assertMatch({ok, {{_, Code2, _}, _, _}}, Res2),
+    {ok, {{_, Code2, _}, Headers2List, _}} = Res2,
+    case Method of
+        get ->
+            ?assertMatch(
+                #{"content-type" := "application/octet-stream"}, maps:from_list(Headers2List)
+            );
+        _ ->
+            ok
+    end,
     assert_second_call(Method, F2()),
 
     %% The same as above but nodes are switched
@@ -256,7 +327,14 @@ import_backup_test(Config, BackupName) ->
 assert_second_call(get, Res) ->
     ?assertMatch({ok, _}, Res);
 assert_second_call(delete, Res) ->
-    ?assertMatch({error, {_, 404, _}}, Res).
+    case Res of
+        {error, {_, 404, _}} ->
+            ok;
+        {error, {{_, 404, _}, _, _}} ->
+            ok;
+        _ ->
+            ct:fail("unexpected result: ~p", [Res])
+    end.
 
 export_cloud_backup(NodeApiPort, Auth) ->
     Body = #{
@@ -301,8 +379,11 @@ list_backups(NodeApiPort, Auth, Page, Limit) ->
     request(get, NodeApiPort, Path, [{<<"page">>, Page}, {<<"limit">>, Limit}], [], Auth).
 
 backup_file_op(Method, NodeApiPort, Auth, BackupName, QueryList) ->
+    backup_file_op(Method, NodeApiPort, Auth, BackupName, QueryList, _Opts = #{}).
+
+backup_file_op(Method, NodeApiPort, Auth, BackupName, QueryList, Opts) ->
     Path = ["data", "files", BackupName],
-    request(Method, NodeApiPort, Path, QueryList, [], Auth).
+    request(Method, NodeApiPort, Path, QueryList, [], Auth, Opts).
 
 upload_backup(NodeApiPort, Auth, BackupFilePath) ->
     Path = emqx_mgmt_api_test_util:api_path(?api_base_url(NodeApiPort), ["data", "files"]),
@@ -331,9 +412,12 @@ request(Method, NodePort, PathParts, Body, Auth) ->
     request(Method, NodePort, PathParts, [], Body, Auth).
 
 request(Method, NodePort, PathParts, QueryList, Body, Auth) ->
+    request(Method, NodePort, PathParts, QueryList, Body, Auth, _Opts = #{}).
+
+request(Method, NodePort, PathParts, QueryList, Body, Auth, Opts) ->
     Path = emqx_mgmt_api_test_util:api_path(?api_base_url(NodePort), PathParts),
     Query = unicode:characters_to_list(uri_string:compose_query(QueryList)),
-    emqx_mgmt_api_test_util:request_api(Method, Path, Query, Auth, Body).
+    emqx_mgmt_api_test_util:request_api(Method, Path, Query, Auth, Body, Opts).
 
 cluster(TC, Config) ->
     Nodes = emqx_cth_cluster:start(
@@ -411,10 +495,14 @@ test_case_specific_apps_spec(TC) when
         emqx_modules,
         emqx_bridge
     ];
-test_case_specific_apps_spec(t_export_cloud) ->
+test_case_specific_apps_spec(TestCase) when
+    TestCase =:= t_export_cloud;
+    TestCase =:= t_export_cloud_ctl
+->
     [
         emqx_auth,
-        emqx_auth_mnesia
+        emqx_auth_mnesia,
+        emqx_schema_registry
     ];
 test_case_specific_apps_spec(_TC) ->
     [].

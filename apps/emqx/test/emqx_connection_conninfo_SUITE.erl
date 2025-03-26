@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2019-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2019-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -59,8 +59,8 @@ t_inconsistent_chan_info(_Config) ->
 
     ClientIds = [
         ClientId
-     || {ClientId, _ConnState, _ConnInfo, _ClientInfo} <- qlc:eval(
-            emqx_cm:all_channels_table([emqx_connection])
+     || {ClientId, _ConnState, _ConnInfo, _ClientInfo} <- emqx_utils_stream:consume(
+            emqx_cm:all_channels_stream([emqx_connection])
         )
     ],
 

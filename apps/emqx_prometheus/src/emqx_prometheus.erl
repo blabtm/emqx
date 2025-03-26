@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -131,8 +131,8 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info({timeout, Timer, ?TIMER_MSG}, State = #{timer := Timer, opts := Opts}) ->
-    #{interval := Interval, headers := Headers, url := Server} = Opts,
-    PushRes = push_to_push_gateway(Server, Headers),
+    #{interval := Interval, headers := Headers, url := Server, method := Method} = Opts,
+    PushRes = push_to_push_gateway(Method, Server, Headers),
     NewTimer = ensure_timer(Interval),
     NewState = maps:update_with(PushRes, fun(C) -> C + 1 end, 1, State#{timer => NewTimer}),
     %% Data is too big, hibernate for saving memory and stop system monitor warning.
@@ -143,9 +143,11 @@ handle_info({update, Conf}, State = #{timer := Timer}) ->
 handle_info(_Msg, State) ->
     {noreply, State}.
 
-push_to_push_gateway(Url, Headers) when is_list(Headers) ->
-    Data = prometheus_text_format:format(?PROMETHEUS_DEFAULT_REGISTRY),
-    case httpc:request(post, {Url, Headers, "text/plain", Data}, ?HTTP_OPTIONS, []) of
+push_to_push_gateway(Method, Url, Headers) when
+    is_list(Headers) andalso (Method =:= put orelse Method =:= post)
+->
+    Data = push_metrics_data(),
+    case httpc:request(Method, {Url, Headers, "text/plain", Data}, ?HTTP_OPTIONS, []) of
         {ok, {{"HTTP/1.1", 200, _}, _RespHeaders, _RespBody}} ->
             ok;
         Error ->
@@ -157,6 +159,10 @@ push_to_push_gateway(Url, Headers) when is_list(Headers) ->
             }),
             failed
     end.
+
+push_metrics_data() ->
+    Rows = [prometheus_text_format:format(Registry) || Registry <- ?PROMETHEUS_ALL_REGISTRIES],
+    iolist_to_binary(Rows).
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -170,17 +176,30 @@ ensure_timer(Interval) ->
 %%--------------------------------------------------------------------
 %% prometheus callbacks
 %%--------------------------------------------------------------------
-opts(#{interval := Interval, headers := Headers, job_name := JobName, push_gateway_server := Url}) ->
-    #{interval => Interval, headers => Headers, url => join_url(Url, JobName)};
+opts(
+    Conf = #{
+        interval := Interval, headers := Headers, job_name := JobName, push_gateway_server := Url
+    }
+) ->
+    #{
+        interval => Interval,
+        headers => Headers,
+        url => join_url(Url, JobName),
+        method => ?MG(method, Conf, put)
+    };
 opts(#{push_gateway := #{url := Url, job_name := JobName} = PushGateway}) ->
-    maps:put(url, join_url(Url, JobName), PushGateway).
+    PushGateway#{
+        url => join_url(Url, JobName),
+        method => ?MG(method, PushGateway, put)
+    }.
 
 join_url(Url, JobName0) ->
+    ClusterName = atom_to_binary(emqx:get_config([cluster, name], emqxcl)),
     [Name, Ip] = string:tokens(atom_to_list(node()), "@"),
     % NOTE: allowing errors here to keep rough backward compatibility
     {JobName1, Errors} = emqx_template:render(
         emqx_template:parse(JobName0),
-        #{<<"name">> => Name, <<"host">> => Ip}
+        #{<<"name">> => Name, <<"host">> => Ip, <<"cluster_name">> => ClusterName}
     ),
     _ =
         Errors == [] orelse
@@ -253,7 +272,7 @@ collect(<<"json">>) ->
         packets => collect_json_data(?MG(emqx_packet_data, RawData)),
         messages => collect_json_data(?MG(emqx_message_data, RawData)),
         delivery => collect_json_data(?MG(emqx_delivery_data, RawData)),
-        client => collect_json_data(?MG(emqx_client_data, RawData)),
+        client => collect_client_json_data(?MG(emqx_client_data, RawData)),
         session => collect_json_data(?MG(emqx_session_data, RawData)),
         cluster => collect_json_data(?MG(cluster_data, RawData)),
         olp => collect_json_data(?MG(emqx_olp_data, RawData)),
@@ -285,7 +304,7 @@ fetch_from_local_node(Mode) ->
         emqx_packet_data => emqx_metric_data(emqx_packet_metric_meta(), Mode),
         emqx_message_data => emqx_metric_data(message_metric_meta(), Mode),
         emqx_delivery_data => emqx_metric_data(delivery_metric_meta(), Mode),
-        emqx_client_data => emqx_metric_data(client_metric_meta(), Mode),
+        emqx_client_data => client_metric_data(Mode),
         emqx_session_data => emqx_metric_data(session_metric_meta(), Mode),
         emqx_olp_data => emqx_metric_data(olp_metric_meta(), Mode),
         emqx_acl_data => emqx_metric_data(acl_metric_meta(), Mode),
@@ -365,6 +384,8 @@ emqx_collect(K = emqx_vm_run_queue, D) -> gauge_metrics(?MG(K, D));
 emqx_collect(K = emqx_vm_process_messages_in_queues, D) -> gauge_metrics(?MG(K, D));
 emqx_collect(K = emqx_vm_total_memory, D) -> gauge_metrics(?MG(K, D));
 emqx_collect(K = emqx_vm_used_memory, D) -> gauge_metrics(?MG(K, D));
+emqx_collect(K = emqx_vm_mnesia_tm_mailbox_size, D) -> gauge_metrics(?MG(K, D));
+emqx_collect(K = emqx_vm_broker_pool_max_mailbox_size, D) -> gauge_metrics(?MG(K, D));
 %%--------------------------------------------------------------------
 %% Cluster Info
 emqx_collect(K = emqx_cluster_nodes_running, D) -> gauge_metrics(?MG(K, D));
@@ -464,6 +485,7 @@ emqx_collect(K = emqx_client_authorize, D) -> counter_metrics(?MG(K, D));
 emqx_collect(K = emqx_client_subscribe, D) -> counter_metrics(?MG(K, D));
 emqx_collect(K = emqx_client_unsubscribe, D) -> counter_metrics(?MG(K, D));
 emqx_collect(K = emqx_client_disconnected, D) -> counter_metrics(?MG(K, D));
+emqx_collect(K = emqx_client_disconnected_reason, D) -> counter_metrics(?MG(K, D));
 %%--------------------------------------------------------------------
 %% Metrics - session
 emqx_collect(K = emqx_session_created, D) -> counter_metrics(?MG(K, D));
@@ -622,7 +644,9 @@ vm_metric_meta() ->
         {emqx_vm_run_queue, gauge, 'run_queue'},
         {emqx_vm_process_messages_in_queues, gauge, 'process_total_messages'},
         {emqx_vm_total_memory, gauge, 'total_memory'},
-        {emqx_vm_used_memory, gauge, 'used_memory'}
+        {emqx_vm_used_memory, gauge, 'used_memory'},
+        {emqx_vm_mnesia_tm_mailbox_size, gauge, 'mnesia_tm_mailbox_size'},
+        {emqx_vm_broker_pool_max_mailbox_size, gauge, 'broker_pool_max_mailbox_size'}
     ].
 
 vm_data(Mode) ->
@@ -631,7 +655,7 @@ vm_data(Mode) ->
         fun({Name, _Type, MetricKAtom}, AccIn) ->
             Labels =
                 case Mode of
-                    node ->
+                    ?PROM_DATA_MODE__NODE ->
                         [];
                     _ ->
                         [{node, node(self())}]
@@ -672,14 +696,53 @@ do_cluster_data(Labels) ->
 %%========================================
 
 emqx_metric_data(MetricNameTypeKeyL, Mode) ->
+    emqx_metric_data(MetricNameTypeKeyL, Mode, _Acc = #{}).
+
+emqx_metric_data(MetricNameTypeKeyL, Mode, Acc) ->
     Metrics = emqx_metrics:all(),
     lists:foldl(
-        fun({Name, _Type, MetricKAtom}, AccIn) ->
-            AccIn#{Name => [{with_node_label(Mode, []), ?C(MetricKAtom, Metrics)}]}
+        fun
+            ({_Name, _Type, undefined}, AccIn) ->
+                AccIn;
+            ({Name, _Type, MetricKAtom}, AccIn) ->
+                AccIn#{Name => [{with_node_label(Mode, []), ?C(MetricKAtom, Metrics)}]}
         end,
-        #{},
+        Acc,
         MetricNameTypeKeyL
     ).
+
+client_metric_data(Mode) ->
+    Acc = listener_shutdown_counts(Mode),
+    emqx_metric_data(client_metric_meta(), Mode, Acc).
+
+listener_shutdown_counts(Mode) ->
+    Data =
+        lists:flatmap(
+            fun(Listener) ->
+                get_listener_shutdown_counts_with_labels(Listener, Mode)
+            end,
+            emqx_listeners:list()
+        ),
+    #{emqx_client_disconnected_reason => Data}.
+
+get_listener_shutdown_counts_with_labels({Id, #{bind := Bind, running := true}}, Mode) ->
+    {ok, #{type := Type, name := Name}} = emqx_listeners:parse_listener_id(Id),
+    AddLabels = fun({Reason, Count}) ->
+        Labels = [
+            {listener_type, Type},
+            {listener_name, Name},
+            {reason, Reason}
+        ],
+        {with_node_label(Mode, Labels), Count}
+    end,
+    case emqx_listeners:shutdown_count(Id, Bind) of
+        {error, _} ->
+            [];
+        Counts ->
+            lists:map(AddLabels, Counts)
+    end;
+get_listener_shutdown_counts_with_labels({_Id, #{running := false}}, _Mode) ->
+    [].
 
 %%==========
 %% Durable Storage
@@ -799,7 +862,8 @@ client_metric_meta() ->
         {emqx_client_authorize, counter, 'client.authorize'},
         {emqx_client_subscribe, counter, 'client.subscribe'},
         {emqx_client_unsubscribe, counter, 'client.unsubscribe'},
-        {emqx_client_disconnected, counter, 'client.disconnected'}
+        {emqx_client_disconnected, counter, 'client.disconnected'},
+        {emqx_client_disconnected_reason, counter, undefined}
     ].
 
 %%==========
@@ -1118,6 +1182,13 @@ collect_stats_json_data(StatsData, StatsClData) ->
 collect_cert_json_data(Data) ->
     collect_json_data_(Data).
 
+collect_client_json_data(Data0) ->
+    ShutdownCounts = maps:with([emqx_client_disconnected_reason], Data0),
+    Data = maps:without([emqx_client_disconnected_reason], Data0),
+    JSON0 = collect_json_data(Data),
+    JSON1 = collect_json_data_(ShutdownCounts),
+    lists:flatten([JSON0 | JSON1]).
+
 collect_vm_json_data(Data) ->
     DataListPerNode = collect_json_data_(Data),
     case ?GET_PROM_DATA_MODE() of
@@ -1153,9 +1224,9 @@ collect_json_data_(Data) ->
 
 zip_json_prom_stats_metrics(Key, Points, [] = _AccIn) ->
     lists:foldl(
-        fun({Lables, Metric}, AccIn2) ->
-            LablesKVMap = maps:from_list(Lables),
-            Point = LablesKVMap#{Key => Metric},
+        fun({Labels, Metric}, AccIn2) ->
+            LabelsKVMap = maps:from_list(Labels),
+            Point = LabelsKVMap#{Key => Metric},
             [Point | AccIn2]
         end,
         [],

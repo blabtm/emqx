@@ -28,7 +28,7 @@ defmodule EMQX.MixProject do
   def application do
     [
       ## FIXME!!! go though emqx.app.src and add missing stuff...
-      extra_applications: [:public_key, :ssl, :os_mon, :logger, :mnesia, :sasl] ++ UMP.extra_applications(),
+      extra_applications: [:public_key, :ssl, :os_mon, :mnesia, :sasl] ++ UMP.extra_applications(),
       mod: {:emqx_app, []}
     ]
   end
@@ -43,6 +43,7 @@ defmodule EMQX.MixProject do
       UMP.common_dep(:gproc),
       UMP.common_dep(:gen_rpc),
       UMP.common_dep(:ekka),
+      UMP.common_dep(:mria),
       UMP.common_dep(:esockd),
       UMP.common_dep(:cowboy),
       UMP.common_dep(:lc),

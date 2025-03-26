@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -74,6 +74,7 @@ t_copy_new_data_dir(Config) ->
         {[ok, ok, ok], []} = rpc:multicall(Nodes, application, stop, [emqx_conf]),
         {[ok, ok, ok], []} = rpc:multicall(Nodes, ?MODULE, set_data_dir_env, []),
         ok = rpc:call(First, application, start, [emqx_conf]),
+        ct:sleep(500),
         {[ok, ok], []} = rpc:multicall(Rest, application, start, [emqx_conf]),
         ?retry(200, 10, ok = assert_data_copy_done(Nodes, File))
     after
@@ -243,7 +244,14 @@ cluster(TC, Specs, Config) ->
     ],
     emqx_cth_cluster:mk_nodespecs(
         [{Name, #{apps => Apps}} || Name <- Specs],
-        #{work_dir => emqx_cth_suite:work_dir(TC, Config)}
+        #{
+            work_dir => emqx_cth_suite:work_dir(TC, Config),
+            start_opts => #{
+                %% Call `init:stop' instead of `erlang:halt/0' for clean mnesia
+                %% shutdown and restart
+                shutdown => 5_000
+            }
+        }
     ).
 
 cluster_spec(Num) ->

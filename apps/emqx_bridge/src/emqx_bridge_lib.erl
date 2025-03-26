@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 -export([
     maybe_withdraw_rule_action/3,
     maybe_withdraw_rule_action/4,
+    external_ids/3,
     upgrade_type/1,
     downgrade_type/2,
     get_conf/2,

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 -module(emqx_ldap).
 
+-include_lib("emqx_resource/include/emqx_resource.hrl").
 -include_lib("emqx_connector/include/emqx_connector.hrl").
 -include_lib("typerefl/include/types.hrl").
 -include_lib("hocon/include/hoconsc.hrl").
@@ -204,18 +205,18 @@ on_get_status(InstId, #{pool_name := PoolName} = State) ->
         connected ->
             emqx_ldap_bind_worker:on_get_status(InstId, State);
         disconnected ->
-            disconnected
+            ?status_disconnected
     end.
 
 get_status_with_poolname(PoolName) ->
     case emqx_resource_pool:health_check_workers(PoolName, fun ?MODULE:do_get_status/1) of
         true ->
-            connected;
+            ?status_connected;
         false ->
             %% Note: here can only return `disconnected` not `connecting`
             %% because the LDAP socket/connection can't be reused
             %% searching on a died socket will never return until timeout
-            disconnected
+            ?status_disconnected
     end.
 
 do_get_status(Conn) ->

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_license_cli).
@@ -30,6 +30,9 @@ license(["update", EncodedLicense]) ->
 license(["info"]) ->
     lists:foreach(
         fun
+            ({max_connections, _V}) ->
+                %% max_sessions will be printed
+                ok;
             ({K, V}) when is_binary(V); is_atom(V); is_list(V) ->
                 ?PRINT("~-16s: ~s~n", [K, V]);
             ({K, V}) ->

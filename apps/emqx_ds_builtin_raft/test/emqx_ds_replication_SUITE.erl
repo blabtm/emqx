@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -689,6 +689,248 @@ t_rebalance_offline_restarts(Config) ->
     %% Target state should still be reached eventually.
     ?retry(1000, 20, ?assertEqual([], emqx_ds_test_helpers:transitions(N1, ?DB))),
     ?assertEqual(lists:sort([S1, S2]), ds_repl_meta(N1, db_sites, [?DB])).
+
+t_rebalance_tolerate_lost(init, Config) ->
+    Apps = [appspec(emqx_durable_storage), appspec(emqx_ds_builtin_raft)],
+    Specs = emqx_cth_cluster:mk_nodespecs(
+        [
+            {t_rebalance_tolerate_lost1, #{apps => Apps}},
+            {t_rebalance_tolerate_lost2, #{apps => Apps}},
+            {t_rebalance_tolerate_lost3, #{apps => Apps}}
+        ],
+        #{work_dir => ?config(work_dir, Config)}
+    ),
+    ok = snabbkaffe:start_trace(),
+    [{nodespecs, Specs} | Config];
+t_rebalance_tolerate_lost('end', _Config) ->
+    ok = snabbkaffe:stop().
+
+%% This testcase verifies that rebalancing can conclude if there are shards
+%% with replicas residing exclusively on nodes that left the cluster (w/o
+%% handing the data off first).
+t_rebalance_tolerate_lost(Config) ->
+    [NS1, NS2, NS3] = ?config(nodespecs, Config),
+    MsgStream = emqx_ds_test_helpers:topic_messages(?FUNCTION_NAME, <<"C1">>),
+
+    %% Start and initialize DB on a first node.
+    %% The same usually happens with current defaults.
+    [N1] = emqx_cth_cluster:start([NS1]),
+    Opts = opts(Config, #{n_shards => 4, n_sites => 1, replication_factor => 3}),
+    assert_db_open([N1], ?DB, Opts),
+
+    %% Start and initialize DB on rest of the nodes.
+    [N2, N3] = emqx_cth_cluster:start([NS2, NS3]),
+    assert_db_open([N2, N3], ?DB, Opts),
+
+    %% Find out which sites are there.
+    Nodes = [N1, N2, N3],
+    Sites = [S1, S2, S3] = [ds_repl_meta(N, this_site) || N <- Nodes],
+    ct:pal("Sites: ~p", [Sites]),
+
+    ct:pal("DS Status [healthy cluster]:", []),
+    ?ON(N2, emqx_ds_replication_layer_meta:print_status()),
+
+    %% Shut down N1 and then make it leave the cluster.
+    %% This will lead to a situation when DB is residing on out-of-cluster nodes only.
+    ok = emqx_cth_cluster:stop_node(N1),
+    _ = ?retry(200, 5, [N2, N3] = ?ON(N2, mria:cluster_nodes(running))),
+    ok = ?ON(N2, ekka:force_leave(N1)),
+    ok = timer:sleep(1_000),
+
+    ct:pal("DS Status [lost node holding the data]:", []),
+    ?ON(N2, emqx_ds_replication_layer_meta:print_status()),
+
+    %% Attempt to forget S1 should fail.
+    ?assertEqual(
+        {error, {member_of_replica_sets, [?DB]}},
+        ?ON(N2, emqx_ds_replication_layer_meta:forget_site(S1))
+    ),
+
+    %% Now turn S2 and S3 into members of DB replica set, excluding S1 in effect.
+    {ok, _} = ds_repl_meta(N2, assign_db_sites, [?DB, [S2, S3]]),
+    ct:pal("DS Status [rebalancing planned]:", []),
+    ?ON(N2, emqx_ds_replication_layer_meta:print_status()),
+
+    %% Target state should still be reached eventually.
+    ?retry(1000, 20, ?assertEqual([], emqx_ds_test_helpers:transitions(N2, ?DB))),
+    ?assertEqual(lists:sort([S2, S3]), ds_repl_meta(N2, db_sites, [?DB])),
+
+    ct:pal("DS Status [rebalancing concluded]:", []),
+    ?ON(N2, emqx_ds_replication_layer_meta:print_status()),
+
+    %% Messages can now again be persisted successfully.
+    {Msgs1, MsgStream1} = emqx_utils_stream:consume(50, MsgStream),
+    {Msgs2, _MsgStream} = emqx_utils_stream:consume(50, MsgStream1),
+    ?assertEqual(ok, ?ON(N2, emqx_ds:store_batch(?DB, Msgs1))),
+    ?assertEqual(ok, ?ON(N3, emqx_ds:store_batch(?DB, Msgs2))),
+    MsgsPersisted = ?ON(N2, emqx_ds_test_helpers:consume(?DB, ['#'])),
+    ok = emqx_ds_test_helpers:diff_messages(Msgs1 ++ Msgs2, MsgsPersisted),
+
+    %% Attempt to forget S1 should now succeed.
+    ?assertEqual(ok, ?ON(N2, emqx_ds_replication_layer_meta:forget_site(S1))),
+
+    ok = emqx_cth_cluster:stop(Nodes).
+
+t_rebalance_tolerate_permanently_lost_quorum(init, Config) ->
+    Apps = [appspec(emqx_durable_storage), appspec(emqx_ds_builtin_raft)],
+    Specs = emqx_cth_cluster:mk_nodespecs(
+        [
+            {t_rebalance_tolerate_plq1, #{apps => Apps}},
+            {t_rebalance_tolerate_plq2, #{apps => Apps}},
+            {t_rebalance_tolerate_plq3, #{apps => Apps}},
+            {t_rebalance_tolerate_plq4, #{apps => Apps}}
+        ],
+        #{work_dir => ?config(work_dir, Config)}
+    ),
+    ok = snabbkaffe:start_trace(),
+    Nodes = emqx_cth_cluster:start(Specs),
+    [{nodes, Nodes}, {nodespecs, Specs} | Config];
+t_rebalance_tolerate_permanently_lost_quorum('end', Config) ->
+    ok = emqx_cth_cluster:stop(?config(nodes, Config)),
+    ok = snabbkaffe:stop().
+
+%% This testcase verifies that rebalancing can still conclude if there are
+%% shards where most of the replicas were permanently lost, such that quorum
+%% is no longer reachable.
+t_rebalance_tolerate_permanently_lost_quorum(Config) ->
+    Nodes = [N1, N2, N3, N4] = ?config(nodes, Config),
+    [_NS1, NS2 | _] = ?config(nodespecs, Config),
+    CIDs = [<<"C1">>, <<"C2">>, <<"C3">>, <<"C4">>, <<"C5">>],
+    MsgStream = emqx_utils_stream:interleave(
+        [emqx_ds_test_helpers:topic_messages(?FUNCTION_NAME, CID) || CID <- CIDs],
+        false
+    ),
+
+    %% Start and initialize DB on all 4 nodes.
+    NShards = 3,
+    Opts = opts(Config, #{n_shards => NShards, n_sites => 4, replication_factor => 4}),
+    assert_db_open(Nodes, ?DB, Opts),
+
+    %% Find out which sites are there.
+    [S1, S2, S3, S4] = [ds_repl_meta(N, this_site) || N <- Nodes],
+
+    ct:pal("DS Status [healthy cluster]:", []),
+    ?ON(N2, emqx_ds_replication_layer_meta:print_status()),
+
+    ?check_trace(
+        begin
+            %% Store a bunch of messages.
+            {Msgs1, MsgStream1} = emqx_utils_stream:consume(20, MsgStream),
+            ?assertEqual(ok, ?ON(N1, emqx_ds:store_batch(?DB, Msgs1, #{sync => true}))),
+
+            %% Stop N2.
+            ok = emqx_cth_cluster:stop_node(N2),
+            ok = timer:sleep(1_000),
+
+            %% Store another bunch of messages.
+            {Msgs2, MsgStream2} = emqx_utils_stream:consume(20, MsgStream1),
+            ?assertEqual(ok, ?ON(N1, emqx_ds:store_batch(?DB, Msgs2, #{sync => true}))),
+
+            %% Stop N3 and N4 and expunge them out of the cluster.
+            ok = emqx_cth_cluster:stop([N3, N4]),
+            ?retry(200, 5, [N1] = ?ON(N1, mria:cluster_nodes(running))),
+            ok = ?ON(N1, ekka:force_leave(N3)),
+            ok = ?ON(N1, ekka:force_leave(N4)),
+            ok = timer:sleep(1_000),
+
+            %% Tell the cluster that S3 is not responsible for the data anymore.
+            %% Since that can lead to transitions involving other lost sites, it should
+            %% be rejected.
+            ?assertEqual(
+                {error, {lost_sites, [S4]}},
+                ds_repl_meta(N1, leave_db_site, [?DB, S3])
+            ),
+
+            %% Tell the cluster that both S3, S4 are not responsible for the data anymore.
+            ?assertEqual(
+                {ok, [S1, S2]},
+                ds_repl_meta(N1, assign_db_sites, [?DB, [S1, S2]])
+            ),
+
+            ct:pal("DS Status [told S4 to leave]:", []),
+            ?ON(N1, emqx_ds_replication_layer_meta:print_status()),
+
+            %% Either S3 or S4.
+            [{del, SL1} | _] = ds_repl_meta(N1, replica_set_transitions, [?DB, <<"0">>]),
+
+            %% Regular means of removing unresponsive replica will fail (likely, time out).
+            {ok, #{site := SLost1}} = ?block_until(#{
+                ?snk_kind := "Removing shard replica failed",
+                shard := <<"0">>,
+                site := _,
+                attempt := 2
+            }),
+
+            %% Force-forget kicks in, but refuses to proceed since S2 is down, it's too
+            %% unsafe.
+            ?block_until(#{
+                ?snk_kind := "Forgetting shard replica failed",
+                shard := <<"0">>,
+                site := SLost1,
+                reason := {member_overview_unavailable, [{_Server, N2}]}
+            }),
+
+            %% Restart N2. There's no quorum, so N2 will keep lagging until then.
+            %% Have to drop mnesia, otherwise N2 coming back online can actually bring
+            %% N3 and N4 back into the cluster.
+            ok = emqx_cth_suite:clean_work_dir(filename:join(maps:get(work_dir, NS2), mnesia)),
+            [N2] = emqx_cth_cluster:start([NS2#{work_dir_dirty => true}]),
+            assert_db_open([N2], ?DB, Opts),
+
+            %% But the force-forgetting should now succeed.
+            ?block_until(#{
+                ?snk_kind := "Unresponsive shard replica forcefully forgotten",
+                shard := <<"0">>,
+                site := SL1
+            }),
+
+            %% Let's see how the allocation looks right after that.
+            ct:pal("DS Status [forgot one lost node]:", []),
+            ?ON(N2, emqx_ds_replication_layer_meta:print_status()),
+
+            %% Target state should still be reached eventually.
+            ?retry(1000, 20, ?assertEqual([], emqx_ds_test_helpers:transitions(N1, ?DB))),
+            ?assertEqual(lists:sort([S1, S2]), ds_repl_meta(N1, db_sites, [?DB])),
+
+            ct:pal("DS Status [rebalancing concluded]:", []),
+            ?ON(N1, emqx_ds_replication_layer_meta:print_status()),
+
+            %% Messages can now again be persisted successfully.
+            {Msgs3, _MsgStream} = emqx_utils_stream:consume(20, MsgStream2),
+            ?assertEqual(ok, ?ON(N2, emqx_ds:store_batch(?DB, Msgs3, #{sync => true}))),
+            %% ...And the original messages still available in the DB.
+            MsgsPersisted = ?ON(N2, emqx_ds_test_helpers:consume(?DB, ['#'])),
+            ok = emqx_ds_test_helpers:diff_messages(
+                [from, topic, payload],
+                lists:sort(Msgs1 ++ Msgs2 ++ Msgs3),
+                lists:sort(MsgsPersisted)
+            ),
+
+            %% Attempt to forget lost sites should succeed.
+            ?assertEqual(ok, ?ON(N2, emqx_ds_replication_layer_meta:forget_site(S3))),
+            ?assertEqual(ok, ?ON(N2, emqx_ds_replication_layer_meta:forget_site(S4)))
+        end,
+        fun(Trace) ->
+            %% Servers only on N1 should have been responsible for "force-forgetting",
+            %% because their log is ahead. Also, in rare circumstances membership
+            %% changes can actually conclude without resorting to force-forgetting.
+            EvsForgotMember = ?of_kind(emqx_ds_replshard_forgot_member, Trace),
+            case EvsForgotMember of
+                [_ | _] ->
+                    ?assertMatch(
+                        [#{server := {_Server, N1}} | _],
+                        EvsForgotMember
+                    ),
+                    ?assertMatch(
+                        [],
+                        [E || #{server := {_Server, N}} = E <- EvsForgotMember, N =/= N1]
+                    );
+                [] ->
+                    %% No force-forgets were performed.
+                    ok
+            end
+        end
+    ).
 
 t_drop_generation(Config) ->
     Apps = [appspec(emqx_durable_storage), emqx_ds_builtin_raft],

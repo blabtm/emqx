@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_bridge_rabbitmq_v2_SUITE).
@@ -12,6 +12,8 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/assert.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
+-include_lib("snabbkaffe/include/snabbkaffe.hrl").
+
 -import(emqx_config_SUITE, [prepare_conf_file/3]).
 
 -import(emqx_bridge_rabbitmq_test_utils, [
@@ -290,6 +292,21 @@ t_action(Config) ->
     ),
     ok.
 
+t_action_stop(_Config) ->
+    Name = atom_to_binary(?FUNCTION_NAME),
+    create_action(?FUNCTION_NAME, Name),
+
+    %% Emulate channel close hitting the timeout
+    meck:new(amqp_channel, [passthrough, no_history]),
+    meck:expect(amqp_channel, close, fun(_Pid) -> timer:sleep(infinity) end),
+
+    %% Delete action should not exceed connector's ?CHANNEL_CLOSE_TIMEOUT
+    {Time, _} = timer:tc(fun() -> delete_action(Name) end),
+    ?assert(Time < 4_500_000),
+
+    meck:unload(amqp_channel),
+    ok.
+
 t_action_not_exist_exchange(_Config) ->
     Name = atom_to_binary(?FUNCTION_NAME),
     create_action(?FUNCTION_NAME, Name, <<"not_exist_exchange">>),
@@ -430,20 +447,28 @@ t_action_dynamic(Config) ->
     ?assertMatch(Payload, Msg),
     ok = emqtt:disconnect(C1),
     InstanceId = instance_id(actions, Name),
-    #{counters := Counters} = emqx_resource:get_metrics(InstanceId),
+    ?retry(
+        _Interval0 = 500,
+        _NAttempts0 = 10,
+        begin
+            #{counters := Counters} = emqx_resource:get_metrics(InstanceId),
+            ?assertMatch(
+                #{
+                    dropped := 0,
+                    success := 1,
+                    matched := 1,
+                    failed := 0,
+                    received := 0
+                },
+                Counters
+            )
+        end
+    ),
+
     ok = delete_action(Name),
     ActionsAfterDelete = emqx_bridge_v2:list(actions),
     ?assertNot(lists:any(Any, ActionsAfterDelete), ActionsAfterDelete),
-    ?assertMatch(
-        #{
-            dropped := 0,
-            success := 0,
-            matched := 1,
-            failed := 0,
-            received := 0
-        },
-        Counters
-    ),
+
     ok.
 
 waiting_for_disconnected_alarms(InstanceId) ->

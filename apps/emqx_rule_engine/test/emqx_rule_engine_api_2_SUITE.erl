@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("common_test/include/ct.hrl").
+-include_lib("emqx/include/asserts.hrl").
 
 -import(emqx_common_test_helpers, [on_exit/1]).
 
@@ -141,6 +142,24 @@ create_rule(Overrides) ->
             SRes
     end.
 
+update_rule(Id, Params) ->
+    Method = put,
+    Path = emqx_mgmt_api_test_util:api_path(["rules", Id]),
+    Res = request(Method, Path, Params),
+    emqx_mgmt_api_test_util:simplify_result(Res).
+
+list_rules() ->
+    Method = get,
+    Path = emqx_mgmt_api_test_util:api_path(["rules"]),
+    Res = request(Method, Path, _Params = ""),
+    emqx_mgmt_api_test_util:simplify_result(Res).
+
+get_rule(Id) ->
+    Method = get,
+    Path = emqx_mgmt_api_test_util:api_path(["rules", Id]),
+    Res = request(Method, Path, _Params = ""),
+    emqx_mgmt_api_test_util:simplify_result(Res).
+
 sources_sql(Sources) ->
     Froms = iolist_to_binary(lists:join(<<", ">>, lists:map(fun source_from/1, Sources))),
     <<"select * from ", Froms/binary>>.
@@ -149,6 +168,15 @@ source_from({v1, Id}) ->
     <<"\"$bridges/", Id/binary, "\" ">>;
 source_from({v2, Id}) ->
     <<"\"$sources/", Id/binary, "\" ">>.
+
+spy_action(Selected, Envs, #{pid := TestPidBin}) ->
+    TestPid = list_to_pid(binary_to_list(TestPidBin)),
+    TestPid ! {rule_called, #{selected => Selected, envs => Envs}},
+    ok.
+
+event_type(EventTopic) ->
+    EventAtom = emqx_rule_events:event_name(EventTopic),
+    emqx_rule_api_schema:event_to_event_type(EventAtom).
 
 %%------------------------------------------------------------------------------
 %% Test cases
@@ -541,6 +569,42 @@ do_t_rule_test_smoke(#{input := Input, expected := #{code := ExpectedCode}} = Ca
             }}
     end.
 
+%% Checks that each event is recognized by `/rule_test' and the examples are valid.
+t_rule_test_examples(_Config) ->
+    AllEventInfos = emqx_rule_events:event_info(),
+    Failures = lists:filtermap(
+        fun
+            (#{event := <<"$bridges/mqtt:*">>}) ->
+                %% Currently, our frontend doesn't support simulating source events.
+                false;
+            (EventInfo) ->
+                #{
+                    sql_example := SQL,
+                    test_columns := TestColumns,
+                    event := EventTopic
+                } = EventInfo,
+                EventType = event_type(EventTopic),
+                Context = lists:foldl(
+                    fun
+                        ({Field, [ExampleValue, _Description]}, Acc) ->
+                            Acc#{Field => ExampleValue};
+                        ({Field, ExampleValue}, Acc) ->
+                            Acc#{Field => ExampleValue}
+                    end,
+                    #{<<"event_type">> => EventType},
+                    TestColumns
+                ),
+                Case = #{
+                    expected => #{code => 200},
+                    input => #{<<"context">> => Context, <<"sql">> => SQL}
+                },
+                do_t_rule_test_smoke(Case)
+        end,
+        AllEventInfos
+    ),
+    ?assertEqual([], Failures),
+    ok.
+
 %% Tests filtering the rule list by used actions and/or sources.
 t_filter_by_source_and_action(_Config) ->
     ?assertMatch(
@@ -618,4 +682,199 @@ t_create_rule_with_null_id(_Config) ->
         {200, #{<<"data">> := [_, _]}},
         list_rules([])
     ),
+    ok.
+
+%% Smoke tests for `$events/sys/alarm_activated' and `$events/sys/alarm_deactivated'.
+t_alarm_events(_Config) ->
+    TestPidBin = list_to_binary(pid_to_list(self())),
+    {201, _} = create_rule(#{
+        <<"id">> => <<"alarms">>,
+        <<"sql">> => iolist_to_binary([
+            <<" select * from ">>,
+            <<" \"$events/sys/alarm_activated\", ">>,
+            <<" \"$events/sys/alarm_deactivated\" ">>
+        ]),
+        <<"actions">> => [
+            #{
+                <<"function">> => <<?MODULE_STRING, ":spy_action">>,
+                <<"args">> => #{<<"pid">> => TestPidBin}
+            }
+        ]
+    }),
+    AlarmName = <<"some_alarm">>,
+    Details = #{more => details},
+    Message = [<<"some">>, $\s | [<<"io">>, "list"]],
+    emqx_alarm:activate(AlarmName, Details, Message),
+    ?assertReceive(
+        {rule_called, #{
+            selected :=
+                #{
+                    message := <<"some iolist">>,
+                    details := #{more := details},
+                    name := AlarmName,
+                    activated_at := _,
+                    event := 'alarm.activated'
+                }
+        }}
+    ),
+
+    %% Activating an active alarm shouldn't trigger the event again.
+    emqx_alarm:activate(AlarmName, Details, Message),
+    emqx_alarm:activate(AlarmName, Details),
+    emqx_alarm:activate(AlarmName),
+    emqx_alarm:safe_activate(AlarmName, Details, Message),
+    ?assertNotReceive({rule_called, _}),
+
+    DeactivateMessage = <<"deactivating">>,
+    DeactivateDetails = #{new => details},
+    emqx_alarm:deactivate(AlarmName, DeactivateDetails, DeactivateMessage),
+    ?assertReceive(
+        {rule_called, #{
+            selected :=
+                #{
+                    message := DeactivateMessage,
+                    details := DeactivateDetails,
+                    name := AlarmName,
+                    activated_at := _,
+                    deactivated_at := _,
+                    event := 'alarm.deactivated'
+                }
+        }}
+    ),
+
+    %% Deactivating an inactive alarm shouldn't trigger the event again.
+    emqx_alarm:deactivate(AlarmName),
+    emqx_alarm:deactivate(AlarmName, Details),
+    emqx_alarm:deactivate(AlarmName, Details, Message),
+    emqx_alarm:safe_deactivate(AlarmName),
+    ?assertNotReceive({rule_called, _}),
+
+    ok.
+
+%% Smoke tests for `last_modified_at' field when creating/updating a rule.
+t_last_modified_at(_Config) ->
+    Id = <<"last_mod_at">>,
+    CreateParams = #{
+        <<"id">> => Id,
+        <<"sql">> => iolist_to_binary([
+            <<" select * from \"t/a\" ">>
+        ]),
+        <<"actions">> => [
+            #{<<"function">> => <<"console">>}
+        ]
+    },
+    {201, Res} = create_rule(CreateParams),
+    ?assertMatch(
+        #{
+            <<"created_at">> := CreatedAt,
+            <<"last_modified_at">> := CreatedAt
+        },
+        Res
+    ),
+    ?assertMatch(
+        {200, #{
+            <<"created_at">> := CreatedAt,
+            <<"last_modified_at">> := CreatedAt
+        }},
+        get_rule(Id)
+    ),
+    ?assertMatch(
+        {200, #{
+            <<"data">> := [
+                #{
+                    <<"created_at">> := CreatedAt,
+                    <<"last_modified_at">> := CreatedAt
+                }
+            ]
+        }},
+        list_rules()
+    ),
+    #{
+        <<"created_at">> := CreatedAt,
+        <<"last_modified_at">> := CreatedAt
+    } = Res,
+    ct:sleep(10),
+    UpdateParams = maps:without([<<"id">>], CreateParams),
+    {200, UpdateRes} = update_rule(Id, UpdateParams),
+    ?assertMatch(
+        #{
+            <<"created_at">> := CreatedAt,
+            <<"last_modified_at">> := LastModifiedAt
+        } when LastModifiedAt =/= CreatedAt,
+        UpdateRes,
+        #{created_at => CreatedAt}
+    ),
+    #{<<"last_modified_at">> := LastModifiedAt} = UpdateRes,
+    ?assertMatch(
+        {200, #{
+            <<"created_at">> := CreatedAt,
+            <<"last_modified_at">> := LastModifiedAt
+        }},
+        get_rule(Id)
+    ),
+    ?assertMatch(
+        {200, #{
+            <<"data">> := [
+                #{
+                    <<"created_at">> := CreatedAt,
+                    <<"last_modified_at">> := LastModifiedAt
+                }
+            ]
+        }},
+        list_rules()
+    ),
+    ok.
+
+%% This verifies that we don't attempt to transform keys in the `details' value of an
+%% alarm activated/deactivated rule test to atoms.
+t_alarm_details_with_unknown_atom_key(_Config) ->
+    Cases = [
+        #{
+            expected => #{code => 200},
+            hint => <<
+                "the original bug was that this failed with 500 when"
+                " trying to convert a binary to existing atom"
+            >>,
+            input =>
+                #{
+                    <<"context">> =>
+                        #{
+                            <<"event_type">> => <<"alarm_activated">>,
+                            <<"name">> => <<"alarm_name">>,
+                            <<"details">> => #{
+                                <<"some_key_that_is_not_a_known_atom">> => <<"yes">>
+                            },
+                            <<"message">> => <<"boom">>,
+                            <<"activated_at">> => 1736512728666
+                        },
+                    <<"sql">> =>
+                        <<"SELECT\n  *\nFROM\n  \"$events/sys/alarm_activated\" ">>
+                }
+        },
+        #{
+            expected => #{code => 200},
+            hint => <<
+                "the original bug was that this failed with 500 when"
+                " trying to convert a binary to existing atom"
+            >>,
+            input =>
+                #{
+                    <<"context">> =>
+                        #{
+                            <<"event_type">> => <<"alarm_deactivated">>,
+                            <<"name">> => <<"alarm_name">>,
+                            <<"details">> => #{
+                                <<"some_key_that_is_not_a_known_atom">> => <<"yes">>
+                            },
+                            <<"message">> => <<"boom">>,
+                            <<"activated_at">> => 1736512728666,
+                            <<"deactivated_at">> => 1736512828666
+                        },
+                    <<"sql">> =>
+                        <<"SELECT\n  *\nFROM\n  \"$events/sys/alarm_deactivated\" ">>
+                }
+        }
+    ],
+    Failures = lists:filtermap(fun do_t_rule_test_smoke/1, Cases),
+    ?assertEqual([], Failures),
     ok.

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@
 
 %% AuthZ Callbacks
 -export([
-    description/0,
     create/1,
     update/1,
     destroy/1,
@@ -60,9 +59,6 @@
     ?VAR_QOS,
     ?VAR_RETAIN
 ]).
-
-description() ->
-    "AuthZ with http".
 
 create(Config) ->
     NConfig = parse_config(Config),
@@ -168,15 +164,16 @@ parse_config(
     #{
         url := RawUrl,
         method := Method,
-        headers := Headers,
+        headers := Headers0,
         request_timeout := ReqTimeout
     } = Conf
 ) ->
     {RequestBase, Path, Query} = emqx_auth_utils:parse_url(RawUrl),
+    Headers = maps:to_list(emqx_auth_http_utils:transform_header_name(Headers0)),
     Conf#{
         method => Method,
         request_base => RequestBase,
-        headers => maps:to_list(emqx_auth_http_utils:transform_header_name(Headers)),
+        headers => emqx_authn_utils:parse_deep(Headers),
         base_path_template => emqx_auth_utils:parse_str(Path, allowed_vars()),
         base_query_template => emqx_auth_utils:parse_deep(
             cow_qs:parse_qs(Query),

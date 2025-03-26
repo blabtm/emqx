@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2018-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2018-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -126,7 +126,10 @@
     limiter_timer :: undefined | reference(),
 
     %% QUIC conn shared state
-    quic_conn_ss :: option(map())
+    quic_conn_ss :: option(map()),
+
+    %% Extra field for future hot-upgrade support
+    extra = []
 }).
 
 -record(retry, {
@@ -366,7 +369,8 @@ init_state(
         limiter_buffer = queue:new(),
         limiter_timer = undefined,
         %% for quic streams to inherit
-        quic_conn_ss = maps:get(conn_shared_state, Opts, undefined)
+        quic_conn_ss = maps:get(conn_shared_state, Opts, undefined),
+        extra = []
     }.
 
 run_loop(
@@ -861,10 +865,9 @@ with_channel(Fun, Args, State = #state{channel = Channel}) ->
 
 handle_outgoing(Packets, State = #state{channel = _Channel}) ->
     Res = do_handle_outgoing(Packets, State),
-    ?EXT_TRACE_WITH_ACTION_STOP(
-        outgoing,
-        Packets,
-        emqx_channel:basic_trace_attrs(_Channel)
+    _ = ?EXT_TRACE_OUTGOING_STOP(
+        emqx_external_trace:basic_attrs(_Channel),
+        Packets
     ),
     Res.
 
@@ -1180,6 +1183,8 @@ activate_socket(State) ->
 
 close_socket(State = #state{sockstate = closed}) ->
     State;
+close_socket(State = #state{transport = emqx_quic_stream, sockstate = read_aborted}) ->
+    wait_for_quic_stream_close(State);
 close_socket(State = #state{transport = Transport, socket = Socket}) ->
     ok = Transport:fast_close(Socket),
     State#state{sockstate = closed}.
@@ -1283,18 +1288,32 @@ set_tcp_keepalive({Type, Id}) ->
 
 -spec graceful_shutdown_transport(atom(), state()) -> state().
 graceful_shutdown_transport(
-    kicked,
+    Reason,
     S = #state{
         transport = emqx_quic_stream,
         socket = Socket
     }
-) ->
-    _ = emqx_quic_stream:shutdown(Socket, read_write, 1000),
-    S#state{sockstate = closed};
+) when Reason =:= takenover; Reason =:= kicked; Reason =:= discarded ->
+    _ = emqx_quic_stream:abort_read(Socket, Reason),
+    S#state{sockstate = read_aborted};
 graceful_shutdown_transport(_Reason, S = #state{transport = Transport, socket = Socket}) ->
     _ = Transport:shutdown(Socket, read_write),
     S#state{sockstate = closed}.
 
+%% @doc wait for stream close or stream read shutdown complete
+%%      this also ensures write shutdown are completed.
+%%      see emqx_quic_stream:abort_read/2
+%% @end
+-spec wait_for_quic_stream_close(state()) -> state().
+wait_for_quic_stream_close(
+    State = #state{
+        transport = emqx_quic_stream,
+        socket = {quic, _Conn, Stream, _},
+        sockstate = read_aborted
+    }
+) ->
+    ok = emqx_quic_stream:wait_for_close(Stream),
+    State#state{sockstate = closed}.
 %%--------------------------------------------------------------------
 %% For CT tests
 %%--------------------------------------------------------------------

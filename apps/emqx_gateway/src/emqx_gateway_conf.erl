@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -208,7 +208,7 @@ listeners(GwName0) ->
     ),
     Listeners = emqx_utils_maps:jsonable_map(
         emqx_utils_maps:deep_get(
-            [<<"gateway">>, GwName, <<"listeners">>], RawConf
+            [<<"gateway">>, GwName, <<"listeners">>], RawConf, #{}
         )
     ),
     convert_listeners(GwName, Listeners).

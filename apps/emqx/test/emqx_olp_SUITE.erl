@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -40,7 +40,8 @@ init_per_testcase(_, Config) ->
         true -> ok;
         false -> ct:fail("runq_flagman is not up")
     end,
-    ok = load_ctl:put_config(#{
+    LCConf = load_ctl:get_config(),
+    ok = load_ctl:put_config(LCConf#{
         ?RUNQ_MON_F0 => true,
         ?RUNQ_MON_F1 => 5,
         ?RUNQ_MON_F2 => 1,

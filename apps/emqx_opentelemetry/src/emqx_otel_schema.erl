@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 -module(emqx_otel_schema).
 
@@ -12,6 +12,10 @@
     fields/1,
     namespace/0,
     desc/1
+]).
+
+-export([
+    validate_sample_ratio/1
 ]).
 
 namespace() -> opentelemetry.
@@ -145,7 +149,7 @@ fields("otel_traces") ->
                 #{
                     default => 2048,
                     desc => ?DESC(max_queue_size),
-                    importance => ?IMPORTANCE_HIDDEN
+                    importance => ?IMPORTANCE_MEDIUM
                 }
             )},
         {exporting_timeout,
@@ -181,7 +185,7 @@ fields("otel_exporter") ->
             ?HOCON(
                 emqx_schema:url(),
                 #{
-                    default => "http://localhost:4317",
+                    default => <<"http://localhost:4317">>,
                     desc => ?DESC(exporter_endpoint),
                     importance => ?IMPORTANCE_HIGH
                 }
@@ -285,6 +289,7 @@ fields("e2e_tracing_options") ->
                 #{
                     default => <<"10%">>,
                     desc => ?DESC(sample_ratio),
+                    validator => fun ?MODULE:validate_sample_ratio/1,
                     importance => ?IMPORTANCE_MEDIUM
                 }
             )},
@@ -312,6 +317,15 @@ fields("e2e_tracing_options") ->
                 #{
                     desc => ?DESC(client_messaging),
                     default => false,
+                    importance => ?IMPORTANCE_MEDIUM
+                }
+            )},
+        {follow_traceparent,
+            ?HOCON(
+                boolean(),
+                #{
+                    desc => ?DESC(follow_traceparent),
+                    default => true,
                     importance => ?IMPORTANCE_MEDIUM
                 }
             )}
@@ -357,3 +371,8 @@ legacy_metrics_converter(OtelConf, _Opts) when is_map(OtelConf) ->
     end;
 legacy_metrics_converter(Conf, _Opts) ->
     Conf.
+
+validate_sample_ratio(Ratio) when 0.0 =< Ratio andalso Ratio =< 1.0 ->
+    ok;
+validate_sample_ratio(_Ratio) ->
+    {error, <<"The sample_ratio is a value between 0 and 1.">>}.

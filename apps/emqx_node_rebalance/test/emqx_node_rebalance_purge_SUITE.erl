@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_node_rebalance_purge_SUITE).
@@ -363,6 +363,8 @@ t_session_purged(Config) ->
         end,
         Node1Clients ++ Node2Clients
     ),
+    %% Retained messages are persisted asynchronously
+    ct:sleep(500),
 
     ?assertEqual(40, erpc:call(Node2, emqx_retainer, retained_count, [])),
     ?assertEqual(NumClientsNode1, erpc:call(Node1, emqx_delayed, delayed_count, [])),

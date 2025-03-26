@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -42,10 +42,10 @@ import_file(Node, FileNode, FileName, Timeout) ->
     rpc:call(Node, emqx_mgmt_data_backup, maybe_copy_and_import, [FileNode, FileName], Timeout).
 
 -spec read_file(node(), binary(), timeout()) ->
-    {ok, binary()} | {error, _} | {bardrpc, _}.
+    {ok, binary()} | {error, _} | {badrpc, _}.
 read_file(Node, FileName, Timeout) ->
     rpc:call(Node, emqx_mgmt_data_backup, read_file, [FileName], Timeout).
 
--spec delete_file(node(), binary(), timeout()) -> ok | {error, _} | {bardrpc, _}.
+-spec delete_file(node(), binary(), timeout()) -> ok | {error, _} | {badrpc, _}.
 delete_file(Node, FileName, Timeout) ->
     rpc:call(Node, emqx_mgmt_data_backup, delete_file, [FileName], Timeout).

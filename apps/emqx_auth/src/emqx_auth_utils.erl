@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -266,7 +266,7 @@ parse_url(Url) ->
 generate_request(
     #{
         method := Method,
-        headers := Headers,
+        headers := Headers0,
         base_path_template := BasePathTemplate,
         base_query_template := BaseQueryTemplate,
         body_template := BodyTemplate
@@ -275,6 +275,7 @@ generate_request(
 ) ->
     Path = render_urlencoded_str(BasePathTemplate, Values),
     Query = render_deep_for_url(BaseQueryTemplate, Values),
+    Headers = emqx_auth_utils:render_deep_for_raw(Headers0, Values),
     case Method of
         get ->
             Body = render_deep_for_url(BodyTemplate, Values),

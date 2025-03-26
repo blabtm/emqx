@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 -module(emqx_bridge_hstreamdb_connector).
 
@@ -172,7 +172,7 @@ on_get_status(_InstId, State) ->
         Error ->
             %% We set it to ?status_connecting so that the channels are not deleted.
             %% The producers in the channels contains buffers so we don't want to delete them.
-            {?status_connecting, State, Error}
+            {?status_connecting, Error}
     end.
 
 %% -------------------------------------------------------------------------------------------------

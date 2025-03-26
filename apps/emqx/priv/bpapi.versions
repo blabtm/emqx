@@ -9,6 +9,7 @@
 {emqx_bridge,4}.
 {emqx_bridge,5}.
 {emqx_bridge,6}.
+{emqx_bridge,7}.
 {emqx_broker,1}.
 {emqx_cluster_link,1}.
 {emqx_cm,1}.
@@ -20,6 +21,7 @@
 {emqx_conf,4}.
 {emqx_connector,1}.
 {emqx_dashboard,1}.
+{emqx_dashboard,2}.
 {emqx_delayed,1}.
 {emqx_delayed,2}.
 {emqx_delayed,3}.
@@ -69,6 +71,7 @@
 {emqx_persistent_session_ds,1}.
 {emqx_plugins,1}.
 {emqx_plugins,2}.
+{emqx_plugins,3}.
 {emqx_prometheus,1}.
 {emqx_prometheus,2}.
 {emqx_resource,1}.

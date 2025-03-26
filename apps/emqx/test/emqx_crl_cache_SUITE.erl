@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_crl_cache_SUITE).
@@ -229,6 +229,18 @@ end_per_testcase(_TestCase, Config) ->
         proplists:get_value(tc_apps, Config)
     ),
     catch meck:unload([emqx_crl_cache]),
+    case whereis(emqx_crl_cache) of
+        Pid when is_pid(Pid) ->
+            MRef = monitor(process, Pid),
+            unlink(Pid),
+            exit(Pid, kill),
+            receive
+                {'DOWN', MRef, process, Pid, _} ->
+                    ok
+            end;
+        _ ->
+            ok
+    end,
     ok.
 
 %%--------------------------------------------------------------------
@@ -336,7 +348,11 @@ start_emqx_with_crl_cache(#{is_cached := IsCached} = Opts, TC, Config) ->
     case IsCached of
         true ->
             %% wait the cache to be filled
-            emqx_crl_cache:refresh(?DEFAULT_URL),
+            {_, {ok, _}} =
+                ?wait_async_action(
+                    emqx_crl_cache:refresh(?DEFAULT_URL),
+                    #{?snk_kind := "emqx_ssl_crl_cache_inserted"}
+                ),
             ?assertReceive({http_get, <<?DEFAULT_URL>>});
         false ->
             %% ensure cache is empty
@@ -874,6 +890,7 @@ t_revoked(Config) ->
     ClientCert = filename:join(DataDir, "client-revoked.cert.pem"),
     ClientKey = filename:join(DataDir, "client-revoked.key.pem"),
     {ok, C} = emqtt:start_link([
+        {connect_timeout, 2},
         {ssl, true},
         {ssl_opts, [
             {certfile, ClientCert},

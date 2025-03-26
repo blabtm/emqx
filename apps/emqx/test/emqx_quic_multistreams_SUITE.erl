@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2021-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -163,7 +163,7 @@ restart_emqx(Config) ->
     ok = stop_emqx(Config),
     emqx_cth_suite:start(
         [mk_emqx_spec()],
-        #{work_dir => emqx_cth_suite:work_dir(Config), boot_type => restart}
+        #{work_dir => emqx_cth_suite:work_dir(Config), work_dir_dirty => true}
     ).
 
 mk_emqx_spec() ->
@@ -843,9 +843,15 @@ t_conn_change_client_addr(Config) ->
     ?assertEqual(
         ok, quicer:setopt(Conn, local_address, "127.0.0.1:" ++ integer_to_list(NewPort))
     ),
-    {ok, NewAddr} = quicer:sockname(Conn),
-    ct:pal("NewAddr: ~p, Old Addr: ~p", [NewAddr, OldAddr]),
-    ?assertNotEqual(OldAddr, NewAddr),
+
+    ?retry(
+        _Delay = 50,
+        _attempt = 20,
+        fun() ->
+            {ok, NewAddr} = quicer:sockname(Conn),
+            ?assertNotEqual(OldAddr, NewAddr)
+        end
+    ),
     ?assert(is_list(emqtt:info(C))),
     ok = emqtt:disconnect(C).
 

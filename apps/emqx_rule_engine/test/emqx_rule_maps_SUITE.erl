@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -27,8 +27,7 @@
     [
         nested_get/2,
         nested_get/3,
-        nested_put/3,
-        atom_key_map/1
+        nested_put/3
     ]
 ).
 
@@ -268,21 +267,6 @@ t_nested_get_mix_map_index(_) ->
             #{a => [1, 2, 3], b => [#{c => 3}]},
             default
         )
-    ).
-
-t_atom_key_map(_) ->
-    ?assertEqual(#{a => 1}, atom_key_map(#{<<"a">> => 1})),
-    ?assertEqual(
-        #{a => 1, b => #{a => 2}},
-        atom_key_map(#{<<"a">> => 1, <<"b">> => #{<<"a">> => 2}})
-    ),
-    ?assertEqual(
-        [#{a => 1}, #{b => #{a => 2}}],
-        atom_key_map([#{<<"a">> => 1}, #{<<"b">> => #{<<"a">> => 2}}])
-    ),
-    ?assertEqual(
-        #{a => 1, b => [#{a => 2}, #{c => 2}]},
-        atom_key_map(#{<<"a">> => 1, <<"b">> => [#{<<"a">> => 2}, #{<<"c">> => 2}]})
     ).
 
 all() ->

@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -44,6 +44,7 @@ init_per_suite(Config) ->
     KafkaHost = os:getenv("KAFKA_PLAIN_HOST", "toxiproxy.emqx.net"),
     KafkaPort = list_to_integer(os:getenv("KAFKA_PLAIN_PORT", "9292")),
     ProxyName = "kafka_plain",
+    ProxyName2 = "kafka_2_plain",
     DirectKafkaHost = os:getenv("KAFKA_DIRECT_PLAIN_HOST", "kafka-1.emqx.net"),
     DirectKafkaPort = list_to_integer(os:getenv("KAFKA_DIRECT_PLAIN_PORT", "9092")),
     emqx_common_test_helpers:reset_proxy(ProxyHost, ProxyPort),
@@ -66,6 +67,7 @@ init_per_suite(Config) ->
         {proxy_host, ProxyHost},
         {proxy_port, ProxyPort},
         {proxy_name, ProxyName},
+        {proxy_name_2, ProxyName2},
         {kafka_host, KafkaHost},
         {kafka_port, KafkaPort},
         {direct_kafka_host, DirectKafkaHost},
@@ -355,6 +357,9 @@ assert_status_api(Line, Type, Name, Status) ->
 get_rule_metrics(RuleId) ->
     emqx_metrics_worker:get_metrics(rule_metrics, RuleId).
 
+reset_rule_metrics(RuleId) ->
+    emqx_metrics_worker:reset_metrics(rule_metrics, RuleId).
+
 tap_telemetry(HandlerId) ->
     TestPid = self(),
     telemetry:attach_many(
@@ -378,6 +383,17 @@ tap_telemetry(HandlerId) ->
 
 simplify_result(Res) ->
     emqx_bridge_v2_testlib:simplify_result(Res).
+
+with_brokers_down(Config, Fun) ->
+    ProxyName1 = ?config(proxy_name, Config),
+    ProxyName2 = ?config(proxy_name_2, Config),
+    ProxyHost = ?config(proxy_host, Config),
+    ProxyPort = ?config(proxy_port, Config),
+    emqx_common_test_helpers:with_failure(
+        down, ProxyName1, ProxyHost, ProxyPort, fun() ->
+            emqx_common_test_helpers:with_failure(down, ProxyName2, ProxyHost, ProxyPort, Fun)
+        end
+    ).
 
 %%------------------------------------------------------------------------------
 %% Testcases
@@ -588,9 +604,6 @@ t_http_api_get(_Config) ->
     ok.
 
 t_create_connector_while_connection_is_down(Config) ->
-    ProxyName = ?config(proxy_name, Config),
-    ProxyHost = ?config(proxy_host, Config),
-    ProxyPort = ?config(proxy_port, Config),
     KafkaHost = ?config(kafka_host, Config),
     KafkaPort = ?config(kafka_port, Config),
     Host = iolist_to_binary([KafkaHost, ":", integer_to_binary(KafkaPort)]),
@@ -622,7 +635,7 @@ t_create_connector_while_connection_is_down(Config) ->
             Disconnected = atom_to_binary(?status_disconnected),
             %% Initially, the connection cannot be stablished.  Messages are not buffered,
             %% hence the status is `?status_disconnected'.
-            emqx_common_test_helpers:with_failure(down, ProxyName, ProxyHost, ProxyPort, fun() ->
+            with_brokers_down(Config, fun() ->
                 {ok, {{_, 201, _}, _, #{<<"status">> := Disconnected}}} =
                     emqx_bridge_v2_testlib:create_connector_api(ConnectorParams),
                 {ok, {{_, 201, _}, _, #{<<"status">> := Disconnected}}} =
@@ -673,7 +686,7 @@ t_create_connector_while_connection_is_down(Config) ->
             %% `?status_connecting' to avoid destroying wolff_producers and their replayq
             %% buffers.
             Connecting = atom_to_binary(?status_connecting),
-            emqx_common_test_helpers:with_failure(down, ProxyName, ProxyHost, ProxyPort, fun() ->
+            with_brokers_down(Config, fun() ->
                 ?retry(
                     _Sleep0 = 1_100,
                     _Attempts0 = 10,
@@ -764,8 +777,8 @@ t_connector_health_check_topic(_Config) ->
         begin
             %% We create a connector pointing to a broker that expects authentication, but
             %% we don't provide it in the config.
-            %% Without a health check topic, we're unable to probe any topic leaders to
-            %% check the actual connection parameters, so the status is "connected".
+            %% Without a health check topic, a dummy topic name is used to probe
+            %% post-auth connectivity, so the status is "disconnected"
             Type = ?TYPE,
             Name = ?FUNCTION_NAME,
             PlainAuthBootstrapHost = <<"kafka-1.emqx.net:9093">>,
@@ -773,7 +786,7 @@ t_connector_health_check_topic(_Config) ->
                 <<"bootstrap_hosts">> => PlainAuthBootstrapHost
             }),
             ?assertMatch(
-                {ok, {{_, 201, _}, _, #{<<"status">> := <<"connected">>}}},
+                {ok, {{_, 201, _}, _, #{<<"status">> := <<"disconnected">>}}},
                 emqx_bridge_v2_testlib:create_connector_api([
                     {connector_type, Type},
                     {connector_name, Name},
@@ -838,14 +851,6 @@ t_invalid_partition_count_metrics(Config) ->
             {ok, {{_, 201, _}, _, #{}}} =
                 emqx_bridge_v2_testlib:create_connector_api(ConnectorParams),
 
-            {ok, {{_, 201, _}, _, #{}}} =
-                emqx_bridge_v2_testlib:create_action_api(ActionParams),
-            RuleTopic = <<"t/a">>,
-            {ok, #{<<"id">> := RuleId}} =
-                emqx_bridge_v2_testlib:create_rule_and_action_http(Type, RuleTopic, [
-                    {bridge_name, ActionName}
-                ]),
-
             {ok, C} = emqtt:start_link([]),
             {ok, _} = emqtt:connect(C),
 
@@ -857,6 +862,14 @@ t_invalid_partition_count_metrics(Config) ->
             ok = meck:new(emqx_bridge_kafka_impl_producer, [passthrough, no_history]),
             on_exit(fun() -> catch meck:unload() end),
             ok = meck:expect(emqx_bridge_kafka_impl_producer, query_mode, 1, simple_sync),
+
+            {ok, {{_, 201, _}, _, #{}}} =
+                emqx_bridge_v2_testlib:create_action_api(ActionParams),
+            RuleTopic = <<"t/a">>,
+            {ok, #{<<"id">> := RuleId}} =
+                emqx_bridge_v2_testlib:create_rule_and_action_http(Type, RuleTopic, [
+                    {bridge_name, ActionName}
+                ]),
 
             %% Simulate `invalid_partition_count'
             emqx_common_test_helpers:with_mock(
@@ -1133,9 +1146,6 @@ t_dynamic_topics(Config) ->
 %% Checks that messages accumulated in disk mode for a fixed topic producer are kicked off
 %% when the action is later restarted and kafka is online.
 t_fixed_topic_recovers_in_disk_mode(Config) ->
-    ProxyName = ?config(proxy_name, Config),
-    ProxyHost = ?config(proxy_host, Config),
-    ProxyPort = ?config(proxy_port, Config),
     Type = proplists:get_value(type, Config, ?TYPE),
     ConnectorName = proplists:get_value(connector_name, Config, <<"c">>),
     ConnectorConfig = proplists:get_value(
@@ -1191,26 +1201,23 @@ t_fixed_topic_recovers_in_disk_mode(Config) ->
             ),
             %% Cut connection to kafka and enqueue some messages
             ActionId = emqx_bridge_v2:id(Type, ActionName),
-            SentMessages =
-                emqx_common_test_helpers:with_failure(
-                    down, ProxyName, ProxyHost, ProxyPort, fun() ->
-                        ct:sleep(100),
-                        SentMessages = [send_message(ActionName) || _ <- lists:seq(1, 5)],
-                        ?assertEqual(5, emqx_resource_metrics:matched_get(ActionId)),
-                        ?retry(
-                            _Sleep = 200,
-                            _Attempts = 20,
-                            ?assertEqual(5, emqx_resource_metrics:queuing_get(ActionId))
-                        ),
-                        ?assertEqual(0, emqx_resource_metrics:success_get(ActionId)),
-                        %% Turn off action, restore kafka connection
-                        ?assertMatch(
-                            {204, _},
-                            emqx_bridge_v2_testlib:disable_kind_api(action, Type, ActionName)
-                        ),
-                        SentMessages
-                    end
+            SentMessages = with_brokers_down(Config, fun() ->
+                ct:sleep(100),
+                SentMessages = [send_message(ActionName) || _ <- lists:seq(1, 5)],
+                ?assertEqual(5, emqx_resource_metrics:matched_get(ActionId)),
+                ?retry(
+                    _Sleep = 200,
+                    _Attempts = 20,
+                    ?assertEqual(5, emqx_resource_metrics:queuing_get(ActionId))
                 ),
+                ?assertEqual(0, emqx_resource_metrics:success_get(ActionId)),
+                %% Turn off action, restore kafka connection
+                ?assertMatch(
+                    {204, _},
+                    emqx_bridge_v2_testlib:disable_kind_api(action, Type, ActionName)
+                ),
+                SentMessages
+            end),
             %% Restart action; should've shot enqueued messages
             ?tapTelemetry(),
             ?assertMatch(
@@ -1443,4 +1450,235 @@ t_inexistent_topic_after_created(Config) ->
         end,
         []
     ),
+    ok.
+
+%% When the connector is disabled but the action is enabled, we should bump the rule
+%% metrics accordingly, bumping only `actions.out_of_service'.
+t_metrics_out_of_service(Config) ->
+    Type = proplists:get_value(type, Config, ?TYPE),
+    ConnectorName = proplists:get_value(connector_name, Config, <<"c">>),
+    ConnectorConfig0 = proplists:get_value(
+        connector_config, Config, connector_config_toxiproxy(Config)
+    ),
+    ConnectorConfig = ConnectorConfig0#{<<"enable">> := false},
+    ActionName = atom_to_binary(?FUNCTION_NAME),
+    ActionConfig1 = proplists:get_value(action_config, Config, action_config(ConnectorName)),
+    ActionConfig = emqx_bridge_v2_testlib:parse_and_check(
+        action,
+        Type,
+        ActionName,
+        emqx_utils_maps:deep_merge(
+            ActionConfig1,
+            #{<<"parameters">> => #{<<"query_mode">> => <<"async">>}}
+        )
+    ),
+    ConnectorParams = [
+        {connector_config, ConnectorConfig},
+        {connector_name, ConnectorName},
+        {connector_type, Type}
+    ],
+    ActionParams = [
+        {action_config, ActionConfig},
+        {action_name, ActionName},
+        {action_type, Type}
+    ],
+    {201, #{<<"enable">> := false}} =
+        simplify_result(emqx_bridge_v2_testlib:create_connector_api(ConnectorParams)),
+    {201, _} = simplify_result(emqx_bridge_v2_testlib:create_action_api(ActionParams)),
+    RuleTopic = <<"t/k/oos">>,
+    {ok, #{<<"id">> := RuleId}} =
+        emqx_bridge_v2_testlib:create_rule_and_action_http(Type, RuleTopic, [
+            {bridge_name, ActionName}
+        ]),
+    %% Async query
+    emqx:publish(emqx_message:make(RuleTopic, <<"a">>)),
+    ?retry(
+        100,
+        10,
+        ?assertMatch(
+            #{
+                counters :=
+                    #{
+                        'matched' := 1,
+                        'failed' := 0,
+                        'passed' := 1,
+                        'actions.success' := 0,
+                        'actions.failed' := 1,
+                        'actions.failed.out_of_service' := 1,
+                        'actions.failed.unknown' := 0,
+                        'actions.discarded' := 0
+                    }
+            },
+            get_rule_metrics(RuleId)
+        )
+    ),
+    %% Sync query
+    {200, _} = simplify_result(
+        emqx_bridge_v2_testlib:update_bridge_api(
+            ActionParams,
+            #{<<"parameters">> => #{<<"query_mode">> => <<"sync">>}}
+        )
+    ),
+    emqx:publish(emqx_message:make(RuleTopic, <<"a">>)),
+    ?retry(
+        100,
+        10,
+        ?assertMatch(
+            #{
+                counters :=
+                    #{
+                        'matched' := 2,
+                        'failed' := 0,
+                        'passed' := 2,
+                        'actions.success' := 0,
+                        'actions.failed' := 2,
+                        'actions.failed.out_of_service' := 2,
+                        'actions.failed.unknown' := 0,
+                        'actions.discarded' := 0
+                    }
+            },
+            get_rule_metrics(RuleId)
+        )
+    ),
+    ok.
+
+%% Verifies that the `actions.failed' and `actions.failed.unknown' counters are bumped
+%% when a message is dropped due to buffer overflow (both sync and async).
+t_overflow_rule_metrics(Config) ->
+    Type = proplists:get_value(type, Config, ?TYPE),
+    ConnectorName = proplists:get_value(connector_name, Config, <<"c">>),
+    ConnectorConfig = proplists:get_value(
+        connector_config, Config, connector_config_toxiproxy(Config)
+    ),
+    ActionName = atom_to_binary(?FUNCTION_NAME),
+    ActionConfig1 = proplists:get_value(action_config, Config, action_config(ConnectorName)),
+    ActionConfig = emqx_bridge_v2_testlib:parse_and_check(
+        action,
+        Type,
+        ActionName,
+        emqx_utils_maps:deep_merge(
+            ActionConfig1,
+            #{
+                <<"parameters">> => #{
+                    <<"query_mode">> => <<"async">>,
+                    <<"buffer">> => #{
+                        <<"segment_bytes">> => <<"1B">>,
+                        <<"per_partition_limit">> => <<"2B">>
+                    }
+                }
+            }
+        )
+    ),
+    ConnectorParams = [
+        {connector_config, ConnectorConfig},
+        {connector_name, ConnectorName},
+        {connector_type, Type}
+    ],
+    ActionParams = [
+        {action_config, ActionConfig},
+        {action_name, ActionName},
+        {action_type, Type}
+    ],
+    {201, _} = simplify_result(emqx_bridge_v2_testlib:create_connector_api(ConnectorParams)),
+    {201, _} = simplify_result(emqx_bridge_v2_testlib:create_action_api(ActionParams)),
+
+    RuleTopic = <<"t/k/overflow">>,
+    {ok, #{<<"id">> := RuleId}} =
+        emqx_bridge_v2_testlib:create_rule_and_action_http(Type, RuleTopic, [
+            {bridge_name, ActionName}
+        ]),
+
+    %% Async
+    emqx:publish(emqx_message:make(RuleTopic, <<"aaaaaaaaaaaaaa">>)),
+    ?retry(
+        100,
+        10,
+        ?assertMatch(
+            #{
+                counters := #{
+                    'dropped' := 1,
+                    'dropped.queue_full' := 1,
+                    'dropped.expired' := 0,
+                    'dropped.other' := 0,
+                    'matched' := 1,
+                    'success' := 0,
+                    'failed' := 0,
+                    'late_reply' := 0,
+                    'retried' := 0
+                }
+            },
+            emqx_bridge_v2:get_metrics(Type, ActionName)
+        )
+    ),
+    ?retry(
+        100,
+        10,
+        ?assertMatch(
+            #{
+                counters :=
+                    #{
+                        'matched' := 1,
+                        'failed' := 0,
+                        'passed' := 1,
+                        'actions.success' := 0,
+                        'actions.failed' := 1,
+                        'actions.failed.out_of_service' := 0,
+                        'actions.failed.unknown' := 1,
+                        'actions.discarded' := 0
+                    }
+            },
+            get_rule_metrics(RuleId)
+        )
+    ),
+
+    %% Sync
+    {200, _} = simplify_result(
+        emqx_bridge_v2_testlib:update_bridge_api(
+            ActionParams,
+            #{<<"parameters">> => #{<<"query_mode">> => <<"sync">>}}
+        )
+    ),
+    ok = reset_rule_metrics(RuleId),
+    emqx:publish(emqx_message:make(RuleTopic, <<"aaaaaaaaaaaaaa">>)),
+    ?retry(
+        100,
+        10,
+        ?assertMatch(
+            #{
+                counters := #{
+                    'dropped' := 1,
+                    'dropped.queue_full' := 1,
+                    'dropped.expired' := 0,
+                    'dropped.other' := 0,
+                    'matched' := 1,
+                    'success' := 0,
+                    'failed' := 0,
+                    'late_reply' := 0,
+                    'retried' := 0
+                }
+            },
+            emqx_bridge_v2:get_metrics(Type, ActionName)
+        )
+    ),
+    ?retry(
+        100,
+        10,
+        ?assertMatch(
+            #{
+                counters :=
+                    #{
+                        'matched' := 1,
+                        'failed' := 0,
+                        'passed' := 1,
+                        'actions.success' := 0,
+                        'actions.failed' := 1,
+                        'actions.failed.out_of_service' := 0,
+                        'actions.failed.unknown' := 1,
+                        'actions.discarded' := 0
+                    }
+            },
+            get_rule_metrics(RuleId)
+        )
+    ),
+
     ok.

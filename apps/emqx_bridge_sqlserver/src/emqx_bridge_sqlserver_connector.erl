@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_bridge_sqlserver_connector).
@@ -16,6 +16,8 @@
 -include_lib("hocon/include/hoconsc.hrl").
 
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
+
+-elvis([{elvis_text_style, line_length, #{skip_comments => whole_line}}]).
 
 %%====================================================================
 %% Exports
@@ -217,6 +219,7 @@ on_start(
         {driver, Driver},
         {database, Database},
         {pool_size, PoolSize},
+        {auto_reconnect, 2},
         {on_disconnect, {?MODULE, disconnect, []}}
     ],
 
@@ -275,8 +278,10 @@ on_get_channel_status(
     #{installed_channels := Channels} = State
 ) ->
     case maps:find(ChannelId, Channels) of
-        {ok, _} -> on_get_status(InstanceId, State);
-        error -> ?status_disconnected
+        {ok, _} ->
+            on_get_status(InstanceId, State);
+        error ->
+            ?status_disconnected
     end.
 
 on_get_channels(ResId) ->
@@ -332,17 +337,27 @@ on_format_query_result({ok, Rows}) ->
 on_format_query_result(Result) ->
     Result.
 
-on_get_status(_InstanceId, #{pool_name := PoolName} = _State) ->
-    Health = emqx_resource_pool:health_check_workers(
+on_get_status(_InstanceId, #{pool_name := PoolName}) ->
+    Results = emqx_resource_pool:health_check_workers(
         PoolName,
-        {?MODULE, do_get_status, []}
+        {?MODULE, do_get_status, []},
+        _Timeout = 5000,
+        #{return_values => true}
     ),
-    status_result(Health).
+    status_result(Results).
 
-status_result(_Status = true) -> ?status_connected;
-status_result(_Status = false) -> ?status_connecting.
-%% TODO:
-%% case for disconnected
+status_result({error, timeout}) ->
+    {?status_connecting, <<"timeout_checking_connections">>};
+status_result({ok, []}) ->
+    %% ecpool will auto-restart after delay
+    {?status_connecting, <<"connection_pool_not_initialized">>};
+status_result({ok, Results}) ->
+    case lists:filter(fun(S) -> S =/= ok end, Results) of
+        [] ->
+            ?status_connected;
+        [{error, Reason} | _] ->
+            {?status_connecting, Reason}
+    end.
 
 %%====================================================================
 %% ecpool callback fns
@@ -358,11 +373,17 @@ connect(Options) ->
 disconnect(ConnectionPid) ->
     odbc:disconnect(ConnectionPid).
 
--spec do_get_status(connection_reference()) -> Result :: boolean().
+-spec do_get_status(connection_reference()) -> ok | {error, term()}.
 do_get_status(Conn) ->
     case execute(Conn, <<"SELECT 1">>) of
-        {selected, [[]], [{1}]} -> true;
-        _ -> false
+        {selected, [[]], [{1}]} ->
+            ok;
+        Other ->
+            _ = disconnect(Conn),
+            {error, #{
+                cause => "unexpected_SELECT_1_result",
+                result => Other
+            }}
     end.
 
 %%====================================================================
@@ -440,31 +461,26 @@ do_query(
         _ ->
             Result = {error, {unrecoverable_error, failed_to_apply_sql_template}}
     end,
-    case Result of
-        {error, Reason} ->
-            ?tp(
-                sqlserver_connector_query_return,
-                #{error => Reason}
-            ),
-            ?SLOG(error, #{
-                msg => "sqlserver_connector_do_query_failed",
-                connector => ResourceId,
-                query => Query,
-                reason => Reason
-            }),
-            case Reason of
-                ecpool_empty ->
-                    {error, {recoverable_error, Reason}};
-                _ ->
-                    Result
-            end;
-        _ ->
-            ?tp(
-                sqlserver_connector_query_return,
-                #{result => Result}
-            ),
-            Result
-    end.
+    handle_result(Result, ResourceId, Query).
+
+handle_result({error, {recoverable_error, _} = Reason} = Result, _ResourceId, _Query) ->
+    ?tp(sqlserver_connector_query_return, #{error => Reason}),
+    Result;
+handle_result({error, Reason}, ResourceId, Query) ->
+    ?tp(sqlserver_connector_query_return, #{error => Reason}),
+    ?SLOG(error, #{
+        msg => "sqlserver_connector_do_query_failed",
+        connector => ResourceId,
+        query => Query,
+        reason => Reason
+    }),
+    case Reason of
+        ecpool_empty -> {error, {recoverable_error, ecpool_empty}};
+        _ -> {error, Reason}
+    end;
+handle_result(Result, _, _) ->
+    ?tp(sqlserver_connector_query_return, #{result => Result}),
+    Result.
 
 worker_do_insert(
     Conn, SQL, #{resource_opts := ResourceOpts, pool_name := ResourceId}
@@ -477,13 +493,46 @@ worker_do_insert(
             {updated, _} ->
                 ok;
             {error, ErrStr} ->
-                ?SLOG(error, LogMeta#{msg => "invalid_request", reason => ErrStr}),
-                {error, {unrecoverable_error, {invalid_request, ErrStr}}}
+                IsConnectionClosedError = is_connection_closed_error(ErrStr),
+                IsConnectionBrokenError = is_connection_broken_error(ErrStr),
+                {LogLevel, Err} =
+                    case IsConnectionClosedError orelse IsConnectionBrokenError of
+                        true ->
+                            {info, {recoverable_error, <<"connection_closed">>}};
+                        false ->
+                            {error, {unrecoverable_error, {invalid_request, ErrStr}}}
+                    end,
+                ?SLOG(LogLevel, LogMeta#{msg => "invalid_request", reason => ErrStr}),
+                {error, Err}
         end
     catch
         _Type:Reason:St ->
             ?SLOG(error, LogMeta#{msg => "invalid_request", reason => Reason, stacktrace => St}),
             {error, {unrecoverable_error, {invalid_request, Reason}}}
+    end.
+
+%% Potential race condition: if an insert request is made while the connection is being
+%% cut by the remote server, this error might be returned.
+%% References:
+%% https://learn.microsoft.com/en-us/sql/relational-databases/errors-events/mssqlserver-17194-database-engine-error?view=sql-server-ver16
+is_connection_closed_error(MsgStr) ->
+    case re:run(MsgStr, <<"0x2746[^0-9a-fA-F]?">>, [{capture, none}]) of
+        match ->
+            true;
+        nomatch ->
+            false
+    end.
+
+%% Potential race condition: if an insert request is made while the connection is being
+%% cut by the remote server, this error might be returned.
+%% References:
+%% https://learn.microsoft.com/en-us/sql/connect/odbc/connection-resiliency?view=sql-server-ver16
+is_connection_broken_error(MsgStr) ->
+    case re:run(MsgStr, <<"SQLSTATE IS: IMC0[1-6]">>, [{capture, none}]) of
+        match ->
+            true;
+        nomatch ->
+            false
     end.
 
 -spec execute(connection_reference(), sql()) ->
@@ -601,9 +650,9 @@ proc_batch_sql(BatchReqs, BatchInserts, Tokens, ChannelConf) ->
     <<BatchInserts/binary, " values ", Values/binary>>.
 
 proc_msg(Tokens, Msg, #{undefined_vars_as_null := true}) ->
-    emqx_placeholder:proc_sql_param_str2(Tokens, Msg);
+    emqx_placeholder:proc_sqlserver_param_str2(Tokens, Msg);
 proc_msg(Tokens, Msg, _) ->
-    emqx_placeholder:proc_sql_param_str(Tokens, Msg).
+    emqx_placeholder:proc_sqlserver_param_str(Tokens, Msg).
 
 to_bin(List) when is_list(List) ->
     unicode:characters_to_binary(List, utf8).

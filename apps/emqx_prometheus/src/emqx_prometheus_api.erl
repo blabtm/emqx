@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -336,6 +336,7 @@ recommend_setting_example() ->
             enable_basic_auth => false,
             push_gateway => #{
                 interval => <<"15s">>,
+                method => put,
                 url => <<"http://127.0.0.1:9091">>,
                 headers => #{<<"Authorization">> => <<"Basic YWRtaW46Y2JraG55eWd5QDE=">>},
                 job_name => <<"${name}/instance/${name}~${host}">>

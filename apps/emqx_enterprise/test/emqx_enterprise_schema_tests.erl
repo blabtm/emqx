@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2022-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2022-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_enterprise_schema_tests).
@@ -104,7 +104,7 @@ get_roots(Mod) ->
 
 has_roots(Mod) ->
     try
-        _ = Mod:module_info(),
+        Mod:module_info(module),
         erlang:function_exported(Mod, roots, 0) andalso
             Mod:roots() =/= []
     catch

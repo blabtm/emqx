@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2017-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2017-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -927,8 +927,13 @@ base62(I) -> $0 + I - 52.
 %% once loaded, it's cheap for subsequent calls.
 %% NOTE: For non-existing modules, this call is not as effective!
 interactive_load(Module) ->
-    _ = catch apply(Module, module_info, [module]),
-    ok.
+    try
+        _ = apply(Module, module_info, [module]),
+        ok
+    catch
+        _:_ ->
+            ok
+    end.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

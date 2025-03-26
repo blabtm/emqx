@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -28,6 +28,7 @@ schemas(Edition) ->
         authn(Edition) ++
         authz() ++
         shared_subs(Edition) ++
+        bridges(Edition) ++
         customized(Edition).
 
 mria(ce) ->
@@ -89,6 +90,11 @@ shared_subs(ee) ->
 shared_subs(ce) ->
     [].
 
+bridges(ee) ->
+    [] ++ bridges(ce);
+bridges(ce) ->
+    [emqx_bridge_mqtt_connector_schema].
+
 %% Add more schemas here.
-customized(_Edition) ->
+customized(_) ->
     [].

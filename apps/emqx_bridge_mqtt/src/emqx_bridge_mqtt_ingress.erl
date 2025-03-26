@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -77,11 +77,15 @@ subscribe_remote_topics(Pid, IngressList, WorkerIdx, PoolSize, Name) ->
     [subscribe_remote_topic(Pid, Ingress, WorkerIdx, PoolSize, Name) || Ingress <- IngressList].
 
 subscribe_remote_topic(
-    Pid, #{remote := #{topic := RemoteTopic, qos := QoS}} = _Remote, WorkerIdx, PoolSize, Name
+    Pid,
+    #{remote := #{topic := RemoteTopic, qos := QoS, no_local := NoLocal}} = _Remote,
+    WorkerIdx,
+    PoolSize,
+    Name
 ) ->
     case should_subscribe(RemoteTopic, WorkerIdx, PoolSize, Name, _LogWarn = true) of
         true ->
-            emqtt:subscribe(Pid, RemoteTopic, QoS);
+            emqtt:subscribe(Pid, RemoteTopic, [{qos, QoS}, {nl, NoLocal}]);
         false ->
             ok
     end.
@@ -155,7 +159,8 @@ unsubscribe_remote_topic(
     ChannelId,
     TopicToHandlerIndex
 ) ->
-    emqx_topic_index:delete(RemoteTopic, ChannelId, TopicToHandlerIndex),
+    IndexTopic = to_index_topic(RemoteTopic),
+    emqx_topic_index:delete(IndexTopic, ChannelId, TopicToHandlerIndex),
     case should_subscribe(RemoteTopic, WorkerIdx, PoolSize, Name, _NoWarn = false) of
         true ->
             case emqtt:unsubscribe(Pid, RemoteTopic) of
@@ -193,14 +198,16 @@ fix_remote_config(#{remote := RC}, BridgeName, TopicToHandlerIndex, Conf) ->
 insert_to_topic_to_handler_index(
     #{remote := #{topic := Topic}} = Conf, TopicToHandlerIndex, BridgeName
 ) ->
-    TopicPattern =
-        case emqx_topic:parse(Topic) of
-            {#share{group = _Group, topic = TP}, _} ->
-                TP;
-            _ ->
-                Topic
-        end,
-    emqx_topic_index:insert(TopicPattern, BridgeName, Conf, TopicToHandlerIndex).
+    IndexTopic = to_index_topic(Topic),
+    emqx_topic_index:insert(IndexTopic, BridgeName, Conf, TopicToHandlerIndex).
+
+to_index_topic(Topic) ->
+    case emqx_topic:parse(Topic) of
+        {#share{group = _Group, topic = TP}, _} ->
+            TP;
+        _ ->
+            Topic
+    end.
 
 parse_remote(#{qos := QoSIn} = Remote, BridgeName) ->
     QoS = downgrade_ingress_qos(QoSIn),

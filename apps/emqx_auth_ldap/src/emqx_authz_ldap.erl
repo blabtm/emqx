@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2023-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2023-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -35,7 +35,6 @@
 
 %% AuthZ Callbacks
 -export([
-    description/0,
     create/1,
     update/1,
     destroy/1,
@@ -50,9 +49,6 @@
 %%------------------------------------------------------------------------------
 %% AuthZ Callbacks
 %%------------------------------------------------------------------------------
-
-description() ->
-    "AuthZ with LDAP".
 
 create(Source) ->
     ResourceId = emqx_authz_utils:make_resource_id(?MODULE),

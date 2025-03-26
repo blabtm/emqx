@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -41,6 +41,12 @@ is_sensitive_key(<<"secret">>) -> true;
 is_sensitive_key(secret_access_key) -> true;
 is_sensitive_key("secret_access_key") -> true;
 is_sensitive_key(<<"secret_access_key">>) -> true;
+is_sensitive_key(access_key_secret) -> true;
+is_sensitive_key("access_key_secret") -> true;
+is_sensitive_key(<<"access_key_secret">>) -> true;
+is_sensitive_key(access_key_id) -> true;
+is_sensitive_key("access_key_id") -> true;
+is_sensitive_key(<<"access_key_id">>) -> true;
 is_sensitive_key(secret_key) -> true;
 is_sensitive_key("secret_key") -> true;
 is_sensitive_key(<<"secret_key">>) -> true;
@@ -155,13 +161,36 @@ redact_v(V) when is_binary(V) ->
         [{var, _}] ->
             V;
         _ ->
-            <<?REDACT_VAL>>
+            do_redact_v(V)
     end;
 redact_v([{str, Bin}]) when is_binary(Bin) ->
     %% The HOCON schema system may generate sensitive values with this format
-    [{str, <<?REDACT_VAL>>}];
-redact_v(_V) ->
-    ?REDACT_VAL.
+    [{str, do_redact_v(Bin)}];
+redact_v(V) ->
+    do_redact_v(V).
+
+do_redact_v(<<"file://", _/binary>> = V) ->
+    V;
+do_redact_v("file://" ++ _ = V) ->
+    V;
+do_redact_v(B) when is_binary(B) ->
+    <<?REDACT_VAL>>;
+do_redact_v(L) when is_list(L) ->
+    ?REDACT_VAL;
+do_redact_v(F) ->
+    try
+        %% this can happen in logs
+        case emqx_secret:term(F) of
+            {file, File} ->
+                File;
+            V ->
+                do_redact_v(V)
+        end
+    catch
+        _:_ ->
+            %% most of the time
+            ?REDACT_VAL
+    end.
 
 deobfuscate(NewConf, OldConf) ->
     deobfuscate(NewConf, OldConf, fun(_) -> false end).

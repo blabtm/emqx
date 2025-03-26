@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -109,6 +109,7 @@
     %% stop the instance
     call_stop/3,
     %% get the query mode of the resource
+    query_mode/2,
     query_mode/3,
     %% Add channel to resource
     call_add_channel/5,
@@ -147,6 +148,8 @@
 
 -export_type([
     query_mode/0,
+    query_kind/0,
+    resource_query_mode/0,
     resource_id/0,
     channel_id/0,
     resource_data/0,
@@ -208,15 +211,14 @@
 %% when calling emqx_resource:health_check/2
 -callback on_get_status(resource_id(), resource_state()) ->
     health_check_status()
-    | {health_check_status(), resource_state()}
-    | {health_check_status(), resource_state(), term()}.
+    | {health_check_status(), Reason :: term()}.
 
 -callback on_get_channel_status(resource_id(), channel_id(), resource_state()) ->
     channel_status()
     | {channel_status(), Reason :: term()}
     | {error, term()}.
 
--callback query_mode(Config :: term()) -> query_mode().
+-callback query_mode(Config :: term()) -> resource_query_mode().
 
 -callback query_opts(Config :: term()) -> #{timeout => timeout()}.
 
@@ -274,6 +276,8 @@
         end
     end)()
 ).
+
+-type channel_config() :: map().
 
 -spec list_types() -> [module()].
 list_types() ->
@@ -398,7 +402,9 @@ query(ResId, Request, Opts) ->
             %% as Kafka and Pulsar producers.
             %% TODO(5.1.1): pass Resource instead of ResId to simple APIs
             %% so the buffer worker does not need to lookup the cache again
-            emqx_resource_buffer_worker:simple_async_query(ResId, Request, Opts);
+            emqx_resource_buffer_worker:simple_async_internal_buffer_query(
+                ResId, Request, Opts
+            );
         {ok, {simple_sync_internal_buffer, _}} ->
             %% This is for bridges/connectors that have internal buffering, such
             %% as Kafka and Pulsar producers.
@@ -633,11 +639,16 @@ call_stop(ResId, Mod, ResourceState) ->
         Res
     end).
 
--spec query_mode(module(), term(), creation_opts()) -> query_mode().
-query_mode(Mod, Config, Opts) ->
+-spec query_mode(module(), channel_config()) -> resource_query_mode().
+query_mode(Mod, ChannelConfig) ->
+    ResourceOpts = fetch_creation_opts(ChannelConfig),
+    query_mode(Mod, ChannelConfig, ResourceOpts).
+
+-spec query_mode(module(), channel_config(), creation_opts()) -> resource_query_mode().
+query_mode(Mod, ChannelConfig, Opts) ->
     case erlang:function_exported(Mod, query_mode, 1) of
         true ->
-            Mod:query_mode(Config);
+            Mod:query_mode(ChannelConfig);
         false ->
             maps:get(query_mode, Opts, sync)
     end.

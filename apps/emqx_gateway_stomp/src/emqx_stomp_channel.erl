@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -280,6 +280,18 @@ assign_clientid_to_conninfo(
     NConnInfo = maps:put(clientid, ClientId, ConnInfo),
     {ok, Packet, Channel#channel{conninfo = NConnInfo}}.
 
+assign_keepalive_to_conninfo(
+    Packet,
+    Channel = #channel{
+        conninfo = ConnInfo,
+        clientinfo = ClientInfo
+    }
+) ->
+    {Cx, _Cy} = maps:get(heartbeat, ClientInfo),
+    Keepalive = floor(Cx / 1000),
+    NConnInfo = maps:put(keepalive, Keepalive, ConnInfo),
+    {ok, Packet, Channel#channel{conninfo = NConnInfo}}.
+
 feedvar(Override, Packet, ConnInfo, ClientInfo) ->
     Envs = #{
         'ConnInfo' => ConnInfo,
@@ -407,7 +419,8 @@ process_connect(
                 {<<"version">>, <<"1.0,1.1,1.2">>},
                 {<<"content-type">>, <<"text/plain">>}
             ],
-            handle_out(connerr, {Headers, undefined, <<"Not Authenticated">>}, Channel)
+            ErrMsg = io_lib:format("Failed to open session: ~ts", [Reason]),
+            handle_out(connerr, {Headers, undefined, failed_to_open_session, ErrMsg}, Channel)
     end.
 
 %%--------------------------------------------------------------------
@@ -435,6 +448,7 @@ handle_in(Packet = ?PACKET(?CMD_CONNECT), Channel) ->
                 fun negotiate_version/2,
                 fun enrich_clientinfo/2,
                 fun assign_clientid_to_conninfo/2,
+                fun assign_keepalive_to_conninfo/2,
                 fun run_conn_hooks/2,
                 fun set_log_meta/2,
                 %% TODO: How to implement the banned in the gateway instance?
@@ -449,7 +463,7 @@ handle_in(Packet = ?PACKET(?CMD_CONNECT), Channel) ->
             process_connect(ensure_connected(NChannel));
         {error, ReasonCode, NChannel} ->
             ErrMsg = io_lib:format("Login Failed: ~ts", [ReasonCode]),
-            handle_out(connerr, {[], undefined, ErrMsg}, NChannel)
+            handle_out(connerr, {[], undefined, ReasonCode, ErrMsg}, NChannel)
     end;
 handle_in(
     Frame = ?PACKET(?CMD_SEND, Headers),
@@ -782,9 +796,9 @@ do_subscribe(
     | {shutdown, Reason :: term(), channel()}
     | {shutdown, Reason :: term(), replies(), channel()}.
 
-handle_out(connerr, {Headers, ReceiptId, ErrMsg}, Channel) ->
+handle_out(connerr, {Headers, ReceiptId, ErrCode, ErrMsg}, Channel) ->
     Frame = error_frame(Headers, ReceiptId, ErrMsg),
-    shutdown(ErrMsg, Frame, Channel);
+    shutdown(ErrCode, Frame, Channel);
 handle_out(error, {ReceiptId, ErrMsg}, Channel) ->
     Frame = error_frame(ReceiptId, ErrMsg),
     {ok, {outgoing, Frame}, Channel};
@@ -802,7 +816,7 @@ handle_out(
         {outgoing, connected_frame(Headers)},
         {event, connected}
     ],
-    {ok, Replies, ensure_heartbeart_timer(Channel)};
+    {ok, Replies, ensure_heartbeat_timer(Channel)};
 handle_out(receipt, undefined, Channel) ->
     {ok, Channel};
 handle_out(receipt, ReceiptId, Channel) ->
@@ -1325,7 +1339,7 @@ ensure_clean_trans_timer(Channel = #channel{transaction = Trans}) ->
 reverse_heartbeats({Cx, Cy}) ->
     iolist_to_binary(io_lib:format("~w,~w", [Cy, Cx])).
 
-ensure_heartbeart_timer(Channel = #channel{clientinfo = ClientInfo}) ->
+ensure_heartbeat_timer(Channel = #channel{clientinfo = ClientInfo}) ->
     Heartbeat = maps:get(heartbeat, ClientInfo),
     ensure_timer(
         [incoming_timer, outgoing_timer],

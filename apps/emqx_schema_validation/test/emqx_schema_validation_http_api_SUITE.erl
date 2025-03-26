@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2024-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 -module(emqx_schema_validation_http_api_SUITE).
 
@@ -1550,4 +1550,20 @@ t_republish_action_failure(_Config) ->
         end,
         []
     ),
+    ok.
+
+%% Checks that index/config order is indeed preserved when we have "many" (> 32)
+%% validations.
+t_many_validations_order(_Config) ->
+    Names = lists:map(
+        fun(N) ->
+            Name = integer_to_binary(50 - N),
+            Validation = validation(Name, [sql_check()]),
+            {201, _} = insert(Validation),
+            Name
+        end,
+        lists:seq(1, 50)
+    ),
+    Topic = <<"t/a">>,
+    ?assertIndexOrder(Names, Topic),
     ok.

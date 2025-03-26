@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020-2024 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2020-2025 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%--------------------------------------------------------------------
 
 -module(emqx_authn_cinfo_SUITE).
@@ -20,7 +20,7 @@ init_per_suite(Config) ->
         work_dir => emqx_cth_suite:work_dir(Config)
     }),
     %% ensure module loaded
-    _ = emqx_variform_bif:module_info(),
+    emqx_utils:interactive_load(emqx_variform_bif),
     [{apps, Apps} | Config].
 
 end_per_suite(Config) ->
