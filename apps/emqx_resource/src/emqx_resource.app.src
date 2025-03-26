@@ -1,14 +1,13 @@
 %% -*- mode: erlang -*-
 {application, emqx_resource, [
     {description, "Manager for all external resources"},
-    {vsn, "0.1.38"},
+    {vsn, "0.1.39"},
     {registered, []},
     {mod, {emqx_resource_app, []}},
     {applications, [
         kernel,
         stdlib,
         gproc,
-        jsx,
         ecpool,
         replayq,
         emqx,

@@ -147,13 +147,29 @@ cluster(["status", "--json"]) ->
     emqx_ctl:print("~ts~n", [emqx_logger_jsonfmt:best_effort_json(Info)]);
 cluster(["discovery", "enable"]) ->
     enable_autocluster();
+cluster(["core", "rebalance", "plan"]) ->
+    Result = mria_rebalance:start(),
+    emqx_ctl:print("~p~n", [Result]);
+cluster(["core", "rebalance", "status"]) ->
+    Result = mria_rebalance:status(),
+    emqx_ctl:print("~p~n", [Result]);
+cluster(["core", "rebalance", "confirm"]) ->
+    Result = mria_rebalance:confirm(),
+    emqx_ctl:print("~p~n", [Result]);
+cluster(["core", "rebalance", "abort"]) ->
+    Result = mria_rebalance:abort(),
+    emqx_ctl:print("~p~n", [Result]);
 cluster(_) ->
     emqx_ctl:usage([
         {"cluster join <Node>", "Join the cluster"},
         {"cluster leave", "Leave the cluster"},
         {"cluster force-leave <Node>", "Force the node leave from cluster"},
         {"cluster status [--json]", "Cluster status"},
-        {"cluster discovery enable", "Enable and run automatic cluster discovery (if configured)"}
+        {"cluster discovery enable", "Enable and run automatic cluster discovery (if configured)"},
+        {"cluster core rebalance plan", "Plan rebalancing of replicants against cores"},
+        {"cluster core rebalance status", "Check status of replicant rebalance"},
+        {"cluster core rebalance confirm", "Execute the planned rebalance"},
+        {"cluster core rebalance abort", "Abort the ongoing rebalance"}
     ]).
 
 %% sort lists for deterministic output
@@ -674,7 +690,7 @@ trace_type(_, _, _) -> error.
 
 listeners([]) ->
     lists:foreach(
-        fun({ID, Conf}) ->
+        fun({Id, Conf}) ->
             Bind = maps:get(bind, Conf),
             Enable = maps:get(enable, Conf),
             Acceptors = maps:get(acceptors, Conf),
@@ -683,17 +699,17 @@ listeners([]) ->
             case Running of
                 true ->
                     CurrentConns =
-                        case emqx_listeners:current_conns(ID, Bind) of
+                        case emqx_listeners:current_conns(Id, Bind) of
                             {error, _} -> [];
                             CC -> [{current_conn, CC}]
                         end,
                     MaxConn =
-                        case emqx_listeners:max_conns(ID, Bind) of
+                        case emqx_listeners:max_conns(Id, Bind) of
                             {error, _} -> [];
                             MC -> [{max_conns, MC}]
                         end,
                     ShutdownCount =
-                        case emqx_listeners:shutdown_count(ID, Bind) of
+                        case emqx_listeners:shutdown_count(Id, Bind) of
                             {error, _} -> [];
                             SC -> [{shutdown_count, SC}]
                         end;
@@ -710,7 +726,7 @@ listeners([]) ->
                     {enbale, Enable},
                     {running, Running}
                 ] ++ CurrentConns ++ MaxConn ++ ShutdownCount,
-            emqx_ctl:print("~ts~n", [ID]),
+            emqx_ctl:print("~ts~n", [Id]),
             lists:foreach(fun indent_print/1, Info)
         end,
         emqx_listeners:list()
@@ -867,10 +883,25 @@ olp(_) ->
 %%--------------------------------------------------------------------
 %% @doc data Command
 
-data(["export"]) ->
-    case emqx_mgmt_data_backup:export(?DATA_BACKUP_OPTS) of
-        {ok, #{filename := Filename}} ->
-            emqx_ctl:print("Data has been successfully exported to ~s.~n", [Filename]);
+data(["export" | Args]) ->
+    maybe
+        {ok, Opts0} ?= parse_data_export_args(Args),
+        Opts = maps:merge(?DATA_BACKUP_OPTS, Opts0),
+        {ok, #{filename := Filename}} ?= emqx_mgmt_data_backup:export(Opts),
+        emqx_ctl:print("Data has been successfully exported to ~s.~n", [Filename])
+    else
+        {error, {unknown_root_keys, UnknownKeys}} ->
+            Msg = iolist_to_binary([
+                <<"Invalid root keys: ">>,
+                lists:join(<<", ">>, UnknownKeys)
+            ]),
+            emqx_ctl:print([Msg, $\n]);
+        {error, {bad_table_sets, InvalidSetNames}} ->
+            Msg = iolist_to_binary([
+                <<"Invalid table sets: ">>,
+                lists:join(<<", ">>, InvalidSetNames)
+            ]),
+            emqx_ctl:print([Msg, $\n]);
         {error, Reason} ->
             Reason1 = emqx_mgmt_data_backup:format_error(Reason),
             emqx_ctl:print("[error] Data export failed, reason: ~p.~n", [Reason1])
@@ -892,25 +923,54 @@ data(["import", Filename]) ->
 data(_) ->
     emqx_ctl:usage([
         {"data import <File>", "Import data from the specified tar archive file"},
-        {"data export", "Export data"}
+        {
+            "data export \\\n"
+            "  [--root-keys key1,key2,key3] \\\n"
+            "  [--table-sets set1,set2,set3] \\\n"
+            "  [--dir out_dir]",
+            "Export data"
+        }
     ]).
+
+parse_data_export_args(Args) ->
+    maybe
+        {ok, Collected} ?= collect_data_export_args(Args, #{}),
+        ok ?= emqx_mgmt_data_backup:validate_export_root_keys(Collected),
+        emqx_mgmt_data_backup:parse_export_request(Collected)
+    end.
+
+collect_data_export_args([], Acc) ->
+    {ok, Acc};
+collect_data_export_args(["--root-keys", RootKeysJoined | Rest], Acc) ->
+    RootKeysStr = string:tokens(RootKeysJoined, [$,]),
+    RootKeys = lists:map(fun list_to_binary/1, RootKeysStr),
+    collect_data_export_args(Rest, Acc#{<<"root_keys">> => RootKeys});
+collect_data_export_args(["--table-sets", TableSetsJoined | Rest], Acc) ->
+    TableSetsStr = string:tokens(TableSetsJoined, [$,]),
+    TableSets = lists:map(fun list_to_binary/1, TableSetsStr),
+    collect_data_export_args(Rest, Acc#{<<"table_sets">> => TableSets});
+collect_data_export_args(["--dir", OutDir | Rest], Acc) ->
+    collect_data_export_args(Rest, Acc#{<<"out_dir">> => OutDir});
+collect_data_export_args(Args, _Acc) ->
+    {error, io_lib:format("unknown arguments: ~p", [Args])}.
 
 %%--------------------------------------------------------------------
 %% @doc Durable storage command
 
 -if(?EMQX_RELEASE_EDITION == ee).
 
-ds(CMD) ->
+ds(Cmd) ->
     case emqx_mgmt_api_ds:is_enabled() of
         true ->
-            do_ds(CMD);
+            do_ds(Cmd);
         false ->
             emqx_ctl:usage([{"ds", "Durable storage is disabled"}])
     end.
 
 do_ds(["info"]) ->
-    emqx_ds_replication_layer_meta:print_status();
-do_ds(["set_replicas", DBStr | SitesStr]) ->
+    emqx_ds_replication_layer_meta:print_status(),
+    ok;
+do_ds(["set-replicas", DBStr | SitesStr]) ->
     case emqx_utils:safe_to_existing_atom(DBStr) of
         {ok, DB} ->
             Sites = lists:map(fun list_to_binary/1, SitesStr),
@@ -918,11 +978,13 @@ do_ds(["set_replicas", DBStr | SitesStr]) ->
                 {ok, _} ->
                     emqx_ctl:print("ok~n");
                 {error, Description} ->
-                    emqx_ctl:print("Unable to update replicas: ~s~n", [Description])
+                    emqx_ctl:warning("Unable to update replicas: ~s~n", [Description])
             end;
         {error, _} ->
-            emqx_ctl:print("Unknown durable storage")
+            emqx_ctl:warning("Unknown durable storage")
     end;
+do_ds(["set_replicas" | Args]) ->
+    do_ds(["set-replicas" | Args]);
 do_ds(["join", DBStr, Site]) ->
     case emqx_utils:safe_to_existing_atom(DBStr) of
         {ok, DB} ->
@@ -932,10 +994,10 @@ do_ds(["join", DBStr, Site]) ->
                 {ok, _} ->
                     emqx_ctl:print("ok~n");
                 {error, Description} ->
-                    emqx_ctl:print("Unable to update replicas: ~s~n", [Description])
+                    emqx_ctl:warning("Unable to update replicas: ~s~n", [Description])
             end;
         {error, _} ->
-            emqx_ctl:print("Unknown durable storage~n")
+            emqx_ctl:warning("Unknown durable storage~n")
     end;
 do_ds(["leave", DBStr, Site]) ->
     case emqx_utils:safe_to_existing_atom(DBStr) of
@@ -946,31 +1008,31 @@ do_ds(["leave", DBStr, Site]) ->
                 {ok, _} ->
                     emqx_ctl:print("ok~n");
                 {error, Description} ->
-                    emqx_ctl:print("Unable to update replicas: ~s~n", [Description])
+                    emqx_ctl:warning("Unable to update replicas: ~s~n", [Description])
             end;
         {error, _} ->
-            emqx_ctl:print("Unknown durable storage~n")
+            emqx_ctl:warning("Unknown durable storage~n")
     end;
 do_ds(["forget", Site]) ->
     case emqx_mgmt_api_ds:forget(list_to_binary(Site), cli) of
         ok ->
             emqx_ctl:print("ok~n");
         {error, Description} ->
-            emqx_ctl:print("Unable to forget site: ~s~n", [Description])
+            emqx_ctl:warning("Unable to forget site: ~s~n", [Description])
     end;
 do_ds(_) ->
     emqx_ctl:usage([
         {"ds info", "Show overview of the embedded durable storage state"},
-        {"ds set_replicas <storage> <site1> <site2> ...",
+        {"ds set-replicas <storage> <site1> <site2> ...",
             "Change the replica set of the durable storage"},
         {"ds join <storage> <site>", "Add site to the replica set of the storage"},
         {"ds leave <storage> <site>", "Remove site from the replica set of the storage"},
-        {"ds forget <site>", "Forcefully remove a site from the list of known sites"}
+        {"ds forget <site>", "Remove a site from the list of known sites"}
     ]).
 
 -else.
 
-ds(_CMD) ->
+ds(_Cmd) ->
     emqx_ctl:usage([{"ds", "DS CLI is not available in this edition of EMQX"}]).
 
 -endif.

@@ -425,6 +425,48 @@ t_bad_parameter(Config) ->
     end,
     ok.
 
+%% Note: it's not possible to setup a true named instance in linux/docker; we only verify
+%% here that the notation for named instances work.  When explicitly defining the port,
+%% the ODBC driver will connect to whatever instance is running on said port, regardless
+%% of what's given as instance name.
+t_named_instance_mismatch(Config) ->
+    Host = ?config(sqlserver_host, Config),
+    Port = ?config(sqlserver_port, Config),
+    %% Note: we connect to the default instance here, despite explicitly definining an
+    %% instance name, because we're using the default instance port.
+    ServerWithInstanceName = iolist_to_binary([
+        Host,
+        $\\,
+        <<"NamedInstance">>,
+        $:,
+        integer_to_binary(Port)
+    ]),
+    ?assertMatch(
+        {ok, _},
+        create_bridge(
+            Config,
+            #{<<"server">> => ServerWithInstanceName}
+        )
+    ),
+    {ok, Res} = emqx_bridge_testlib:get_bridge_api(Config),
+    ?assertMatch(
+        #{
+            <<"status">> := <<"disconnected">>,
+            <<"status_reason">> := <<"{unhealthy_target,", _/binary>>
+        },
+        Res
+    ),
+    #{<<"status_reason">> := Msg} = Res,
+    ?assertEqual(
+        match,
+        re:run(
+            Msg,
+            <<"connected instance does not match desired instance name">>,
+            [global, {capture, none}]
+        )
+    ),
+    ok.
+
 %%------------------------------------------------------------------------------
 %% Helper fns
 %%------------------------------------------------------------------------------
@@ -469,6 +511,8 @@ common_init(ConfigT) ->
                     {sqlserver_config, SQLServerConf},
                     {sqlserver_bridge_type, BridgeType},
                     {sqlserver_name, Name},
+                    {bridge_type, BridgeType},
+                    {bridge_name, Name},
                     {proxy_host, ProxyHost},
                     {proxy_port, ProxyPort}
                     | Config0
@@ -537,7 +581,7 @@ create_bridge(Config, Overrides) ->
     Name = ?config(sqlserver_name, Config),
     SSConfig0 = ?config(sqlserver_config, Config),
     SSConfig = emqx_utils_maps:deep_merge(SSConfig0, Overrides),
-    emqx_bridge:create(BridgeType, Name, SSConfig).
+    emqx_bridge_testlib:create_bridge_api(BridgeType, Name, SSConfig).
 
 delete_bridge(Config) ->
     BridgeType = ?config(sqlserver_bridge_type, Config),
@@ -548,8 +592,12 @@ create_bridge_http(Params) ->
     Path = emqx_mgmt_api_test_util:api_path(["bridges"]),
     AuthHeader = emqx_mgmt_api_test_util:auth_header_(),
     case emqx_mgmt_api_test_util:request_api(post, Path, "", AuthHeader, Params) of
-        {ok, Res} -> {ok, emqx_utils_json:decode(Res, [return_maps])};
-        Error -> Error
+        {ok, Res} ->
+            #{<<"type">> := Type, <<"name">> := Name} = Params,
+            _ = emqx_bridge_v2_testlib:kickoff_action_health_check(Type, Name),
+            {ok, emqx_utils_json:decode(Res)};
+        Error ->
+            Error
     end.
 
 send_message(Config, Payload) ->

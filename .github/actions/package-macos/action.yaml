@@ -52,7 +52,7 @@ runs:
             echo "SELF_HOSTED=false" >> $GITHUB_OUTPUT
             ;;
         esac
-    - uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4.0.2
+    - uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
       id: cache
       if: steps.prepare.outputs.SELF_HOSTED != 'true'
       with:
@@ -109,6 +109,8 @@ runs:
         APPLE_DEVELOPER_IDENTITY: ${{ inputs.apple_developer_identity }}
         APPLE_DEVELOPER_ID_BUNDLE: ${{ inputs.apple_developer_id_bundle }}
         APPLE_DEVELOPER_ID_BUNDLE_PASSWORD: ${{ inputs.apple_developer_id_bundle_password }}
+        # In above job, OTP is built with --disable-dynamic-ssl-lib and openssl@1.1, QUIC just follow
+        QUICER_TLS_VER: openssl
       shell: bash
       run: |
         export PATH="${{ steps.prepare.outputs.OTP_INSTALL_PATH }}/bin:$PATH"

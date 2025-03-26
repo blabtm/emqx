@@ -39,16 +39,6 @@
 -include_lib("emqx/include/logger.hrl").
 -include_lib("emqx_durable_storage/include/emqx_ds_metrics.hrl").
 
--import(
-    prometheus_model_helpers,
-    [
-        create_mf/5,
-        gauge_metric/1,
-        gauge_metrics/1,
-        counter_metrics/1
-    ]
-).
-
 %% APIs
 -export([start_link/1, info/0]).
 
@@ -131,8 +121,8 @@ handle_cast(_Msg, State) ->
     {noreply, State}.
 
 handle_info({timeout, Timer, ?TIMER_MSG}, State = #{timer := Timer, opts := Opts}) ->
-    #{interval := Interval, headers := Headers, url := Server} = Opts,
-    PushRes = push_to_push_gateway(Server, Headers),
+    #{interval := Interval, headers := Headers, url := Server, method := Method} = Opts,
+    PushRes = push_to_push_gateway(Method, Server, Headers),
     NewTimer = ensure_timer(Interval),
     NewState = maps:update_with(PushRes, fun(C) -> C + 1 end, 1, State#{timer => NewTimer}),
     %% Data is too big, hibernate for saving memory and stop system monitor warning.
@@ -143,9 +133,11 @@ handle_info({update, Conf}, State = #{timer := Timer}) ->
 handle_info(_Msg, State) ->
     {noreply, State}.
 
-push_to_push_gateway(Url, Headers) when is_list(Headers) ->
-    Data = prometheus_text_format:format(?PROMETHEUS_DEFAULT_REGISTRY),
-    case httpc:request(post, {Url, Headers, "text/plain", Data}, ?HTTP_OPTIONS, []) of
+push_to_push_gateway(Method, Url, Headers) when
+    is_list(Headers) andalso (Method =:= put orelse Method =:= post)
+->
+    Data = push_metrics_data(),
+    case httpc:request(Method, {Url, Headers, "text/plain", Data}, ?HTTP_OPTIONS, []) of
         {ok, {{"HTTP/1.1", 200, _}, _RespHeaders, _RespBody}} ->
             ok;
         Error ->
@@ -157,6 +149,10 @@ push_to_push_gateway(Url, Headers) when is_list(Headers) ->
             }),
             failed
     end.
+
+push_metrics_data() ->
+    Rows = [prometheus_text_format:format(Registry) || Registry <- ?PROMETHEUS_ALL_REGISTRIES],
+    iolist_to_binary(Rows).
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -170,17 +166,30 @@ ensure_timer(Interval) ->
 %%--------------------------------------------------------------------
 %% prometheus callbacks
 %%--------------------------------------------------------------------
-opts(#{interval := Interval, headers := Headers, job_name := JobName, push_gateway_server := Url}) ->
-    #{interval => Interval, headers => Headers, url => join_url(Url, JobName)};
+opts(
+    Conf = #{
+        interval := Interval, headers := Headers, job_name := JobName, push_gateway_server := Url
+    }
+) ->
+    #{
+        interval => Interval,
+        headers => Headers,
+        url => join_url(Url, JobName),
+        method => ?MG(method, Conf, put)
+    };
 opts(#{push_gateway := #{url := Url, job_name := JobName} = PushGateway}) ->
-    maps:put(url, join_url(Url, JobName), PushGateway).
+    PushGateway#{
+        url => join_url(Url, JobName),
+        method => ?MG(method, PushGateway, put)
+    }.
 
 join_url(Url, JobName0) ->
+    ClusterName = atom_to_binary(emqx:get_config([cluster, name], emqxcl)),
     [Name, Ip] = string:tokens(atom_to_list(node()), "@"),
     % NOTE: allowing errors here to keep rough backward compatibility
     {JobName1, Errors} = emqx_template:render(
         emqx_template:parse(JobName0),
-        #{<<"name">> => Name, <<"host">> => Ip}
+        #{<<"name">> => Name, <<"host">> => Ip, <<"cluster_name">> => ClusterName}
     ),
     _ =
         Errors == [] orelse
@@ -273,7 +282,7 @@ add_collect_family(Callback, MetricWithType, Data) ->
     ok.
 
 add_collect_family(Name, Data, Callback, Type) ->
-    Callback(create_mf(Name, _Help = <<"">>, Type, ?MODULE, Data)).
+    Callback(prometheus_model_helpers:create_mf(Name, _Help = <<"">>, Type, ?MODULE, Data)).
 
 %% behaviour
 fetch_from_local_node(Mode) ->
@@ -398,7 +407,6 @@ emqx_collect(K = emqx_packets_publish_sent, D) -> counter_metrics(?MG(K, D));
 emqx_collect(K = emqx_packets_publish_inuse, D) -> counter_metrics(?MG(K, D));
 emqx_collect(K = emqx_packets_publish_error, D) -> counter_metrics(?MG(K, D));
 emqx_collect(K = emqx_packets_publish_auth_error, D) -> counter_metrics(?MG(K, D));
-emqx_collect(K = emqx_packets_publish_dropped, D) -> counter_metrics(?MG(K, D));
 %% puback
 emqx_collect(K = emqx_packets_puback_received, D) -> counter_metrics(?MG(K, D));
 emqx_collect(K = emqx_packets_puback_sent, D) -> counter_metrics(?MG(K, D));
@@ -442,6 +450,8 @@ emqx_collect(K = emqx_messages_publish, D) -> counter_metrics(?MG(K, D));
 emqx_collect(K = emqx_messages_dropped, D) -> counter_metrics(?MG(K, D));
 emqx_collect(K = emqx_messages_dropped_expired, D) -> counter_metrics(?MG(K, D));
 emqx_collect(K = emqx_messages_dropped_no_subscribers, D) -> counter_metrics(?MG(K, D));
+emqx_collect(K = emqx_messages_dropped_quota_exceeded, D) -> counter_metrics(?MG(K, D));
+emqx_collect(K = emqx_messages_dropped_receive_maximum, D) -> counter_metrics(?MG(K, D));
 emqx_collect(K = emqx_messages_forward, D) -> counter_metrics(?MG(K, D));
 emqx_collect(K = emqx_messages_retained, D) -> counter_metrics(?MG(K, D));
 emqx_collect(K = emqx_messages_delayed, D) -> counter_metrics(?MG(K, D));
@@ -536,13 +546,16 @@ emqx_collect(K = ?DS_SKIPSTREAM_LTS_HIT, D) -> counter_metrics(?MG(K, D, []));
 emqx_collect(K = ?DS_SKIPSTREAM_LTS_MISS, D) -> counter_metrics(?MG(K, D, []));
 emqx_collect(K = ?DS_SKIPSTREAM_LTS_FUTURE, D) -> counter_metrics(?MG(K, D, []));
 emqx_collect(K = ?DS_SKIPSTREAM_LTS_EOS, D) -> counter_metrics(?MG(K, D, []));
-emqx_collect(K = ?DS_POLL_REQUESTS, D) -> counter_metrics(?MG(K, D, []));
-emqx_collect(K = ?DS_POLL_REQUESTS_FULFILLED, D) -> counter_metrics(?MG(K, D, []));
-emqx_collect(K = ?DS_POLL_REQUESTS_DROPPED, D) -> counter_metrics(?MG(K, D, []));
-emqx_collect(K = ?DS_POLL_REQUESTS_EXPIRED, D) -> counter_metrics(?MG(K, D, []));
-emqx_collect(K = ?DS_POLL_REQUEST_SHARING, D) -> gauge_metrics(?MG(K, D, []));
-emqx_collect(K = ?DS_POLL_WAITING_QUEUE_LEN, D) -> gauge_metrics(?MG(K, D, []));
-emqx_collect(K = ?DS_POLL_PENDING_QUEUE_LEN, D) -> gauge_metrics(?MG(K, D, [])).
+%% DS beamformer:
+emqx_collect(K = ?DS_SUBS_FANOUT_TIME, D) -> gauge_metrics(?MG(K, D, []));
+emqx_collect(K = ?DS_SUBS_STUCK_TOTAL, D) -> counter_metrics(?MG(K, D, []));
+emqx_collect(K = ?DS_SUBS_UNSTUCK_TOTAL, D) -> counter_metrics(?MG(K, D, []));
+%% DS beamformer worker:
+emqx_collect(K = ?DS_SUBS, D) -> gauge_metrics(?MG(K, D, []));
+emqx_collect(K = ?DS_SUBS_BEAMS_SENT_TOTAL, D) -> gauge_metrics(?MG(K, D, []));
+emqx_collect(K = ?DS_SUBS_REQUEST_SHARING, D) -> gauge_metrics(?MG(K, D, []));
+emqx_collect(K = ?DS_SUBS_FULFILL_TIME, D) -> counter_metrics(?MG(K, D, []));
+emqx_collect(K = ?DS_SUBS_SCAN_TIME, D) -> counter_metrics(?MG(K, D, [])).
 
 %%--------------------------------------------------------------------
 %% Indicators
@@ -706,7 +719,7 @@ listener_shutdown_counts(Mode) ->
         ),
     #{emqx_client_disconnected_reason => Data}.
 
-get_listener_shutdown_counts_with_labels({Id, #{bind := Bind}}, Mode) ->
+get_listener_shutdown_counts_with_labels({Id, #{bind := Bind, running := true}}, Mode) ->
     {ok, #{type := Type, name := Name}} = emqx_listeners:parse_listener_id(Id),
     AddLabels = fun({Reason, Count}) ->
         Labels = [
@@ -721,7 +734,9 @@ get_listener_shutdown_counts_with_labels({Id, #{bind := Bind}}, Mode) ->
             [];
         Counts ->
             lists:map(AddLabels, Counts)
-    end.
+    end;
+get_listener_shutdown_counts_with_labels({_Id, #{running := false}}, _Mode) ->
+    [].
 
 %%==========
 %% Durable Storage
@@ -763,7 +778,6 @@ emqx_packet_metric_meta() ->
         {emqx_packets_publish_inuse, counter, 'packets.publish.inuse'},
         {emqx_packets_publish_error, counter, 'packets.publish.error'},
         {emqx_packets_publish_auth_error, counter, 'packets.publish.auth_error'},
-        {emqx_packets_publish_dropped, counter, 'packets.publish.dropped'},
         %% puback
         {emqx_packets_puback_received, counter, 'packets.puback.received'},
         {emqx_packets_puback_sent, counter, 'packets.puback.sent'},
@@ -810,6 +824,8 @@ message_metric_meta() ->
         {emqx_messages_dropped, counter, 'messages.dropped'},
         {emqx_messages_dropped_expired, counter, 'messages.dropped.await_pubrel_timeout'},
         {emqx_messages_dropped_no_subscribers, counter, 'messages.dropped.no_subscribers'},
+        {emqx_messages_dropped_quota_exceeded, counter, 'messages.dropped.quota_exceeded'},
+        {emqx_messages_dropped_receive_maximum, counter, 'messages.dropped.receive_maximum'},
         {emqx_messages_forward, counter, 'messages.forward'},
         {emqx_messages_retained, counter, 'messages.retained'},
         {emqx_messages_delayed, counter, 'messages.delayed'},
@@ -1238,3 +1254,15 @@ do_start() ->
 %% deprecated_since 5.0.10, remove this when 5.1.x
 do_stop() ->
     emqx_prometheus_sup:stop_child(?APP).
+
+%%--------------------------------------------------------------------
+%% prometheus_model_helpers proxy
+%%
+gauge_metric(Metric) ->
+    prometheus_model_helpers:gauge_metric(Metric).
+
+gauge_metrics(Values) ->
+    prometheus_model_helpers:gauge_metrics(Values).
+
+counter_metrics(Specs) ->
+    prometheus_model_helpers:counter_metrics(Specs).

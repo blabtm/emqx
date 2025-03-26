@@ -433,7 +433,7 @@ t_wss_update_opts(Config) ->
         %% Unable to connect with old SSL options, server's cert is signed by another CA.
         ct:pal("attempting connection with unknown CA"),
         ?assertError(
-            timeout,
+            {down, {shutdown, {tls_alert, {unknown_ca, _}}}},
             emqtt_connect_wss(Host, Port, [
                 {cacerts, public_key:cacerts_get()}
                 | ClientSSLOpts
@@ -458,9 +458,8 @@ t_wss_update_opts(Config) ->
         ),
 
         %% Unable to connect with old SSL options, certificate is now required.
-        %% Due to a bug `emqtt` does not instantly report that socket was closed.
         ?assertError(
-            timeout,
+            {ws_upgrade_failed, {closed, {error, {tls_alert, {certificate_required, _}}}}},
             emqtt_connect_wss(Host, Port, [
                 {cacertfile, filename:join(PrivDir, "ca-next.pem")}
                 | ClientSSLOpts
@@ -701,6 +700,47 @@ t_quic_update_opts_fail(Config) ->
         ok = emqtt:stop(C3)
     end).
 
+t_symlink_certs(Config) ->
+    PrivDir = ?config(priv_dir, Config),
+    Host = "127.0.0.1",
+    Port = emqx_common_test_helpers:select_free_port(ssl),
+    Cacertfile = filename:join(PrivDir, "ca-next.pem"),
+    Certfile = filename:join(PrivDir, "server.pem"),
+    Keyfile = filename:join(PrivDir, "server.key"),
+    CacertfileSymlink = filename:join(PrivDir, "ca-next-symlink.pem"),
+    CertfileSymlink = filename:join(PrivDir, "server-symlink.pem"),
+    KeyfileSymlink = filename:join(PrivDir, "server-symlink.key"),
+    ok = file:make_symlink(Cacertfile, CacertfileSymlink),
+    ok = file:make_symlink(Certfile, CertfileSymlink),
+    ok = file:make_symlink(Keyfile, KeyfileSymlink),
+    Conf = #{
+        <<"enable">> => true,
+        <<"bind">> => format_bind({Host, Port}),
+        <<"ssl_options">> => #{
+            <<"cacertfile">> => CacertfileSymlink,
+            <<"certfile">> => CertfileSymlink,
+            <<"keyfile">> => KeyfileSymlink,
+            <<"verify">> => <<"verify_peer">>
+        }
+    },
+    Name = ?FUNCTION_NAME,
+    Type = ssl,
+    with_listener(Type, Name, Conf, fun() ->
+        ClientSSLOpts = [
+            {verify, verify_peer},
+            {customize_hostname_check, [{match_fun, fun(_, _) -> true end}]}
+        ],
+        C1 = emqtt_connect_ssl(Host, Port, [
+            {cacertfile, filename:join(PrivDir, "ca-next.pem")},
+            {certfile, filename:join(PrivDir, "client.pem")},
+            {keyfile, filename:join(PrivDir, "client.key")}
+            | ClientSSLOpts
+        ]),
+        emqtt:stop(C1),
+        ok
+    end),
+    ok.
+
 with_listener(Type, Name, Config, Then) ->
     {ok, _} = emqx:update_config([listeners, Type, Name], {create, Config}),
     try
@@ -714,13 +754,13 @@ emqtt_connect_tcp(Host, Port) ->
     emqtt_connect(fun emqtt:connect/1, #{
         host => Host,
         port => Port,
-        connect_timeout => 1
+        connect_timeout => 500
     }).
 
 emqtt_connect_ssl(Host, Port, SSLOpts) ->
     emqtt_connect(fun emqtt:connect/1, #{
         hosts => [{Host, Port}],
-        connect_timeout => 2,
+        connect_timeout => 500,
         ssl => true,
         ssl_opts => SSLOpts
     }).
@@ -728,7 +768,7 @@ emqtt_connect_ssl(Host, Port, SSLOpts) ->
 emqtt_connect_quic(Host, Port, SSLOpts) ->
     emqtt_connect(fun emqtt:quic_connect/1, #{
         hosts => [{Host, Port}],
-        connect_timeout => 2,
+        connect_timeout => 500,
         ssl => true,
         ssl_opts => SSLOpts
     }).
@@ -736,7 +776,7 @@ emqtt_connect_quic(Host, Port, SSLOpts) ->
 emqtt_connect_wss(Host, Port, SSLOpts) ->
     emqtt_connect(fun emqtt:ws_connect/1, #{
         hosts => [{Host, Port}],
-        connect_timeout => 2,
+        connect_timeout => 500,
         ws_transport_options => [
             {protocols, [http]},
             {transport, tls},

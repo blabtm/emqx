@@ -126,6 +126,11 @@ create_bridge(Config, Overrides) ->
     ct:pal("creating bridge with config: ~p", [BridgeConfig]),
     emqx_bridge:create(BridgeType, BridgeName, BridgeConfig).
 
+%% For running RPCs in peers.
+infer_dashboard_base_url() ->
+    Port = emqx_config:get([dashboard, listeners, http, bind], 18083),
+    "http://127.0.0.1:" ++ integer_to_list(Port).
+
 list_bridges_api() ->
     Params = [],
     Path = emqx_mgmt_api_test_util:api_path(["bridges"]),
@@ -135,7 +140,7 @@ list_bridges_api() ->
     Res =
         case emqx_mgmt_api_test_util:request_api(get, Path, "", AuthHeader, Params, Opts) of
             {ok, {Status, Headers, Body0}} ->
-                {ok, {Status, Headers, emqx_utils_json:decode(Body0, [return_maps])}};
+                {ok, {Status, Headers, emqx_utils_json:decode(Body0)}};
             Error ->
                 Error
         end,
@@ -154,14 +159,20 @@ create_bridge_api(Config, Overrides) ->
 
 create_bridge_api(BridgeType, BridgeName, BridgeConfig) ->
     Params = BridgeConfig#{<<"type">> => BridgeType, <<"name">> => BridgeName},
-    Path = emqx_mgmt_api_test_util:api_path(["bridges"]),
+    Host = infer_dashboard_base_url(),
+    Path = emqx_mgmt_api_test_util:api_path(Host, ["bridges"]),
     AuthHeader = emqx_mgmt_api_test_util:auth_header_(),
     Opts = #{return_all => true},
     ct:pal("creating bridge (via http): ~p", [Params]),
     Res =
         case emqx_mgmt_api_test_util:request_api(post, Path, "", AuthHeader, Params, Opts) of
             {ok, {Status, Headers, Body0}} ->
-                {ok, {Status, Headers, emqx_utils_json:decode(Body0, [return_maps])}};
+                ActionType = emqx_bridge_lib:upgrade_type(BridgeType),
+                erpc:multicall(emqx:running_nodes(), fun() ->
+                    _ = emqx_bridge_v2_testlib:kickoff_action_health_check(ActionType, BridgeName),
+                    _ = emqx_bridge_v2_testlib:kickoff_source_health_check(ActionType, BridgeName)
+                end),
+                {ok, {Status, Headers, emqx_utils_json:decode(Body0)}};
             Error ->
                 Error
         end,
@@ -184,8 +195,15 @@ update_bridge_api(Config, Overrides) ->
     ct:pal("updating bridge (via http): ~p", [Params]),
     Res =
         case emqx_mgmt_api_test_util:request_api(put, Path, "", AuthHeader, Params, Opts) of
-            {ok, {_Status, _Headers, Body0}} -> {ok, emqx_utils_json:decode(Body0, [return_maps])};
-            Error -> Error
+            {ok, {_Status, _Headers, Body0}} ->
+                ActionType = emqx_bridge_lib:upgrade_type(BridgeType),
+                erpc:multicall(emqx:running_nodes(), fun() ->
+                    _ = emqx_bridge_v2_testlib:kickoff_action_health_check(ActionType, Name),
+                    _ = emqx_bridge_v2_testlib:kickoff_source_health_check(ActionType, Name)
+                end),
+                {ok, emqx_utils_json:decode(Body0)};
+            Error ->
+                Error
         end,
     ct:pal("bridge update result: ~p", [Res]),
     Res.
@@ -199,7 +217,7 @@ get_bridge_api(Config) ->
     ct:pal("getting bridge (via http)", []),
     Res =
         case emqx_mgmt_api_test_util:request_api(get, Path, "", AuthHeader) of
-            {ok, Body0} -> {ok, emqx_utils_json:decode(Body0, [return_maps])};
+            {ok, Body0} -> {ok, emqx_utils_json:decode(Body0)};
             Error -> Error
         end,
     ct:pal("bridge result: ~p", [Res]),
@@ -249,9 +267,9 @@ probe_bridge_api(BridgeType, BridgeName, BridgeConfig) ->
     Res.
 
 try_decode_error(Body0) ->
-    case emqx_utils_json:safe_decode(Body0, [return_maps]) of
+    case emqx_utils_json:safe_decode(Body0) of
         {ok, #{<<"message">> := Msg0} = Body1} ->
-            case emqx_utils_json:safe_decode(Msg0, [return_maps]) of
+            case emqx_utils_json:safe_decode(Msg0) of
                 {ok, Msg1} -> Body1#{<<"message">> := Msg1};
                 {error, _} -> Body1
             end;
@@ -281,7 +299,7 @@ create_rule_and_action(Action, RuleTopic, Opts) ->
     ct:pal("rule action params: ~p", [Params]),
     case emqx_mgmt_api_test_util:request_api(post, Path, "", AuthHeader, Params) of
         {ok, Res0} ->
-            Res = #{<<"id">> := RuleId} = emqx_utils_json:decode(Res0, [return_maps]),
+            Res = #{<<"id">> := RuleId} = emqx_utils_json:decode(Res0),
             on_exit(fun() -> ok = emqx_rule_engine:delete_rule(RuleId) end),
             {ok, Res};
         Error ->

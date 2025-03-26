@@ -76,6 +76,8 @@
 -export([merge_appspec/2]).
 -export([merge_config/2]).
 
+-export([inhibit_config_loader/2]).
+
 %% "Unofficial" `emqx_config_handler' and `emqx_conf' APIs
 -export([schema_module/0, upgrade_raw_conf/1]).
 
@@ -379,7 +381,8 @@ default_appspec(emqx_dashboard, _SuiteOpts) ->
 default_appspec(App, _SuiteOpts) when
     App == emqx_schema_registry;
     App == emqx_schema_validation;
-    App == emqx_message_transformation
+    App == emqx_message_transformation;
+    App == emqx_ds_shared_sub
 ->
     %% NOTE: Start those apps with default configuration.
     #{config => #{}};

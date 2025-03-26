@@ -164,13 +164,13 @@ set_default_auth_result(Result) ->
 -spec pre_hook_authenticate(emqx_types:clientinfo()) ->
     ok | continue | {error, not_authorized}.
 pre_hook_authenticate(#{enable_authn := false}) ->
-    ?TRACE_RESULT("pre_hook_authenticate", ok, enable_authn_false);
+    ?TRACE_RESULT("PRE_HOOK_AUTHN", ok, authentication_not_enabled);
 pre_hook_authenticate(#{enable_authn := quick_deny_anonymous} = Credential) ->
     case is_username_defined(Credential) of
         true ->
             continue;
         false ->
-            ?TRACE_RESULT("pre_hook_authenticate", {error, not_authorized}, enable_authn_false)
+            ?TRACE_RESULT("PRE_HOOK_AUTHN", {error, not_authorized}, quick_deny_anonymous)
     end;
 pre_hook_authenticate(_) ->
     continue.
@@ -266,10 +266,23 @@ format_retain_flag(true) ->
 format_retain_flag(false) ->
     "R0".
 
--compile({inline, [run_hooks/3]}).
-run_hooks(Name, Args, Acc) ->
+run_hooks(Name, Args, Acc) when Name == 'client.authenticate'; Name == 'client.authorize' ->
     ok = emqx_metrics:inc(Name),
-    emqx_hooks:run_fold(Name, Args, Acc).
+    {Time, Value} = timer:tc(
+        fun() -> emqx_hooks:run_fold(Name, Args, Acc) end
+    ),
+    try
+        emqx_metrics_worker:observe_hist(
+            ?ACCESS_CONTROL_METRICS_WORKER,
+            Name,
+            total_latency,
+            erlang:convert_time_unit(Time, microsecond, millisecond)
+        )
+    catch
+        _:_ ->
+            ok
+    end,
+    Value.
 
 -compile({inline, [inc_authz_metrics/1]}).
 inc_authz_metrics(allow) ->

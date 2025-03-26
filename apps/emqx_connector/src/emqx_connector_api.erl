@@ -15,6 +15,8 @@
 %%--------------------------------------------------------------------
 -module(emqx_connector_api).
 
+-feature(maybe_expr, enable).
+
 -behaviour(minirest_api).
 
 -include_lib("typerefl/include/types.hrl").
@@ -27,6 +29,7 @@
 %% Swagger specs from hocon schema
 -export([
     api_spec/0,
+    check_api_schema/2,
     paths/0,
     schema/1,
     namespace/0
@@ -42,6 +45,7 @@
     '/connectors_probe'/2
 ]).
 
+%% RPC targets
 -export([lookup_from_local_node/2]).
 
 -define(CONNECTOR_NOT_ENABLED,
@@ -69,7 +73,30 @@
 namespace() -> "connector".
 
 api_spec() ->
-    emqx_dashboard_swagger:spec(?MODULE, #{check_schema => true}).
+    emqx_dashboard_swagger:spec(?MODULE, #{check_schema => fun ?MODULE:check_api_schema/2}).
+
+check_api_schema(Request, #{path := "/connectors/:id", method := put = Method} = Metadata) ->
+    ConnectorId = emqx_utils_maps:deep_get([bindings, id], Request),
+    try emqx_connector_resource:parse_connector_id(ConnectorId, #{atom_name => false}) of
+        {ConnectorType, _ConnectorName} ->
+            %% Since we know the connector type, we refine the schema to get more decent
+            %% error messages.
+            {_, Ref} = emqx_connector_info:api_schema(ConnectorType, atom_to_list(Method)),
+            Schema = hoconsc:mk(Ref),
+            emqx_dashboard_swagger:filter_check_request(
+                Request, refine_api_schema(Schema, Metadata)
+            )
+    catch
+        throw:#{reason := Reason} ->
+            ?NOT_FOUND(<<"Invalid connector id, ", Reason/binary>>)
+    end;
+check_api_schema(Request, Metadata) ->
+    emqx_dashboard_swagger:filter_check_request(Request, Metadata).
+
+refine_api_schema(Schema, Metadata = #{path := Path, method := Method}) ->
+    Spec = maps:get(Method, schema(Path)),
+    SpecRefined = Spec#{'requestBody' => Schema},
+    Metadata#{apispec => SpecRefined}.
 
 paths() ->
     [
@@ -430,6 +457,7 @@ lookup_from_all_nodes(ConnectorType, ConnectorName, SuccCode) ->
             ?INTERNAL_ERROR(Reason)
     end.
 
+%% RPC Target
 lookup_from_local_node(ConnectorType, ConnectorName) ->
     case emqx_connector:lookup(ConnectorType, ConnectorName) of
         {ok, Res} -> {ok, format_resource(Res, node())};
@@ -467,7 +495,10 @@ do_create_or_update_connector(ConnectorType, ConnectorName, Conf, HttpStatusCode
             PreOrPostConfigUpdate =:= post_config_update
         ->
             ?BAD_REQUEST(emqx_utils_api:to_json(redact(Reason)));
-        {error, Reason} when is_map(Reason) ->
+        {error, Reason0} when is_map(Reason0) ->
+            %% When root validators fail, the returned value is the whole config root.  We
+            %% focus down to the config from the request to avoid returning a huge map.
+            Reason = maybe_focus_on_request_connector(Reason0, ConnectorType, ConnectorName),
             ?BAD_REQUEST(emqx_utils_api:to_json(redact(Reason)))
     end.
 
@@ -803,3 +834,11 @@ maybe_unwrap(RpcMulticallResult) ->
 
 redact(Term) ->
     emqx_utils:redact(Term).
+
+maybe_focus_on_request_connector(Reason0, Type, Name) ->
+    case Reason0 of
+        #{value := #{Type := #{Name := Val}}} ->
+            Reason0#{value := Val};
+        _ ->
+            Reason0
+    end.

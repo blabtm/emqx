@@ -39,18 +39,21 @@
 
 -type permission_resolution() :: allow | deny.
 
+%% re:mp()
+-type re_pattern() :: tuple().
+
 -type who_condition() ::
-    ipaddress()
+    all
     | username()
     | clientid()
-    | {'and', [ipaddress() | username() | clientid()]}
-    | {'or', [ipaddress() | username() | clientid()]}
-    | all.
--type ipaddress() ::
-    {ipaddr, esockd_cidr:cidr_string()}
-    | {ipaddrs, list(esockd_cidr:cidr_string())}.
--type username() :: {username, binary()}.
--type clientid() :: {clientid, binary()}.
+    | client_attr()
+    | ipaddress()
+    | {'and', [who_condition()]}
+    | {'or', [who_condition()]}.
+-type ipaddress() :: {ipaddr, esockd_cidr:cidr_string()} | {ipaddrs, [esockd_cidr:cidr_string()]}.
+-type username() :: {username, binary() | re_pattern()}.
+-type clientid() :: {clientid, binary() | re_pattern()}.
+-type client_attr() :: {client_attr, Name :: binary(), Value :: binary() | re_pattern()}.
 
 -type action_condition() ::
     subscribe
@@ -93,7 +96,18 @@
 
 -type permission_resolution_precompile() :: permission_resolution().
 
--type who_precompile() :: who_condition().
+-type ip_address_precompile() ::
+    {ipaddr, esockd_cidr:cidr_string()} | {ipaddrs, list(esockd_cidr:cidr_string())}.
+-type username_precompile() :: {username, binary()} | {username, {re, iodata()}}.
+-type clientid_precompile() :: {clientid, binary()} | {clientid, {re, iodata()}}.
+
+-type who_precompile() ::
+    ip_address_precompile()
+    | username_precompile()
+    | clientid_precompile()
+    | {'and', [who_precompile()]}
+    | {'or', [who_precompile()]}
+    | all.
 
 -type subscribe_option_precompile() :: {qos, qos() | [qos()]}.
 -type publish_option_precompile() :: {qos, qos() | [qos()]} | {retain, retain_condition()}.
@@ -116,6 +130,7 @@
 
 -export_type([
     permission_resolution_precompile/0,
+    who_precompile/0,
     action_precompile/0,
     topic_precompile/0,
     rule_precompile/0
@@ -234,17 +249,26 @@ compile_who(all) ->
 compile_who({user, Username}) ->
     compile_who({username, Username});
 compile_who({username, {re, Username}}) ->
-    {ok, MP} = re:compile(bin(Username)),
-    {username, MP};
+    case re:compile(bin(Username)) of
+        {ok, MP} -> {username, MP};
+        {error, Reason} -> throw({invalid_username_re, Reason})
+    end;
 compile_who({username, Username}) ->
     {username, {eq, bin(Username)}};
 compile_who({client, Clientid}) ->
     compile_who({clientid, Clientid});
 compile_who({clientid, {re, Clientid}}) ->
-    {ok, MP} = re:compile(bin(Clientid)),
-    {clientid, MP};
+    case re:compile(bin(Clientid)) of
+        {ok, MP} -> {clientid, MP};
+        {error, Reason} -> throw({invalid_clientid_re, Reason})
+    end;
 compile_who({clientid, Clientid}) ->
     {clientid, {eq, bin(Clientid)}};
+compile_who({client_attr, Name, {re, Attr}}) ->
+    {ok, MP} = re:compile(bin(Attr)),
+    {client_attr, bin(Name), MP};
+compile_who({client_attr, Name, Attr}) ->
+    {client_attr, bin(Name), {eq, bin(Attr)}};
 compile_who({ipaddr, CIDR}) ->
     {ipaddr, esockd_cidr:parse(CIDR, true)};
 compile_who({ipaddrs, CIDRs}) ->
@@ -347,17 +371,16 @@ match_who(#{username := undefined}, {username, _}) ->
 match_who(#{username := Username}, {username, {eq, Username}}) ->
     true;
 match_who(#{username := Username}, {username, {re_pattern, _, _, _, _} = MP}) ->
-    case re:run(Username, MP) of
-        {match, _} -> true;
-        _ -> false
-    end;
+    is_re_match(Username, MP);
 match_who(#{clientid := Clientid}, {clientid, {eq, Clientid}}) ->
     true;
 match_who(#{clientid := Clientid}, {clientid, {re_pattern, _, _, _, _} = MP}) ->
-    case re:run(Clientid, MP) of
-        {match, _} -> true;
-        _ -> false
-    end;
+    is_re_match(Clientid, MP);
+match_who(#{client_attrs := Attrs}, {client_attr, Name, {eq, Value}}) ->
+    maps:get(Name, Attrs, undefined) =:= Value;
+match_who(#{client_attrs := Attrs}, {client_attr, Name, {re_pattern, _, _, _, _} = MP}) ->
+    Value = maps:get(Name, Attrs, undefined),
+    is_binary(Value) andalso is_re_match(Value, MP);
 match_who(#{peerhost := undefined}, {ipaddr, _CIDR}) ->
     false;
 match_who(#{peerhost := IpAddress}, {ipaddr, CIDR}) ->
@@ -389,6 +412,12 @@ match_who(ClientInfo, {'or', Principals}) when is_list(Principals) ->
     );
 match_who(_, _) ->
     false.
+
+is_re_match(Value, Pattern) ->
+    case re:run(Value, Pattern) of
+        {match, _} -> true;
+        _ -> false
+    end.
 
 match_topics(_ClientInfo, _Topic, []) ->
     false;

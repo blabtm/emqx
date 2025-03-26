@@ -94,19 +94,19 @@ t_license_info(_Config) ->
     Res = request(get, uri(["license"]), []),
     ?assertMatch({ok, 200, _}, Res),
     {ok, 200, Payload} = Res,
-    ?assertEqual(
+    ?assertMatch(
         #{
-            <<"customer">> => <<"Foo">>,
-            <<"customer_type">> => 10,
-            <<"deployment">> => <<"bar-deployment">>,
-            <<"email">> => <<"contact@foo.com">>,
-            <<"expiry">> => false,
-            <<"expiry_at">> => <<"2295-10-27">>,
-            <<"max_connections">> => 100,
-            <<"start_at">> => <<"2022-01-11">>,
-            <<"type">> => <<"trial">>
+            <<"customer">> := <<"Foo">>,
+            <<"customer_type">> := 10,
+            <<"deployment">> := <<"bar-deployment">>,
+            <<"email">> := <<"contact@foo.com">>,
+            <<"expiry">> := false,
+            <<"expiry_at">> := <<"2295-10-27">>,
+            <<"max_sessions">> := 100,
+            <<"start_at">> := <<"2022-01-11">>,
+            <<"type">> := <<"trial">>
         },
-        emqx_utils_json:decode(Payload, [return_maps])
+        emqx_utils_json:decode(Payload)
     ),
     ok.
 
@@ -120,7 +120,7 @@ t_set_default_license(_Config) ->
     ?assertMatch({ok, 200, _}, Res),
     {ok, 200, Payload} = Res,
     %% assert that it's not the string "default" returned
-    ?assertMatch(#{<<"customer">> := _}, emqx_utils_json:decode(Payload, [return_maps])),
+    ?assertMatch(#{<<"customer">> := _}, emqx_utils_json:decode(Payload)),
     ok.
 
 t_license_upload_key_success(_Config) ->
@@ -132,19 +132,19 @@ t_license_upload_key_success(_Config) ->
     ),
     ?assertMatch({ok, 200, _}, Res),
     {ok, 200, Payload} = Res,
-    ?assertEqual(
+    ?assertMatch(
         #{
-            <<"customer">> => <<"Foo">>,
-            <<"customer_type">> => 10,
-            <<"deployment">> => <<"bar-deployment">>,
-            <<"email">> => <<"contact@foo.com">>,
-            <<"expiry">> => false,
-            <<"expiry_at">> => <<"2295-10-27">>,
-            <<"max_connections">> => 999,
-            <<"start_at">> => <<"2022-01-11">>,
-            <<"type">> => <<"trial">>
+            <<"customer">> := <<"Foo">>,
+            <<"customer_type">> := 10,
+            <<"deployment">> := <<"bar-deployment">>,
+            <<"email">> := <<"contact@foo.com">>,
+            <<"expiry">> := false,
+            <<"expiry_at">> := <<"2295-10-27">>,
+            <<"max_sessions">> := 999,
+            <<"start_at">> := <<"2022-01-11">>,
+            <<"type">> := <<"trial">>
         },
-        emqx_utils_json:decode(Payload, [return_maps])
+        emqx_utils_json:decode(Payload)
     ),
     ?assertMatch(
         #{max_connections := 999},
@@ -166,7 +166,7 @@ t_license_upload_key_bad_key(_Config) ->
             <<"code">> => <<"BAD_REQUEST">>,
             <<"message">> => <<"Bad license key">>
         },
-        emqx_utils_json:decode(Payload, [return_maps])
+        emqx_utils_json:decode(Payload)
     ),
     assert_untouched_license(),
     ok.
@@ -184,7 +184,7 @@ t_license_upload_key_not_json(_Config) ->
             <<"code">> => <<"BAD_REQUEST">>,
             <<"message">> => <<"Invalid request params">>
         },
-        emqx_utils_json:decode(Payload, [return_maps])
+        emqx_utils_json:decode(Payload)
     ),
     assert_untouched_license(),
     ok.
@@ -289,7 +289,7 @@ validate_setting(Res, ExpectLow, ExpectHigh) ->
             <<"connection_low_watermark">> => ExpectLow,
             <<"connection_high_watermark">> => ExpectHigh
         },
-        emqx_utils_json:decode(Payload, [return_maps])
+        emqx_utils_json:decode(Payload)
     ).
 
 validate_setting(Res, ExpectLow, ExpectHigh, DynMax) ->
@@ -300,4 +300,4 @@ validate_setting(Res, ExpectLow, ExpectHigh, DynMax) ->
         <<"connection_high_watermark">> := ExpectHigh,
         <<"dynamic_max_connections">> := DynMax
     } =
-        emqx_utils_json:decode(Payload, [return_maps]).
+        emqx_utils_json:decode(Payload).

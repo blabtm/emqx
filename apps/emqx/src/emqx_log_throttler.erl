@@ -187,7 +187,25 @@ schedule_refresh(PeriodMs) ->
     ?tp(log_throttler_sched_refresh, #{new_period_ms => PeriodMs}),
     erlang:send_after(PeriodMs, ?MODULE, refresh).
 
-new_throttler(unrecoverable_resource_error = Msg) ->
+new_throttler(Msg) when
+    Msg =:= unrecoverable_resource_error;
+    Msg =:= failed_to_trigger_fallback_action;
+    Msg =:= transformation_failed;
+    Msg =:= transformation_eval_operation_failure;
+    Msg =:= transformation_eval_operation_exception;
+    Msg =:= payload_encode_failed;
+    Msg =:= payload_decode_failed;
+    Msg =:= payload_decode_schema_not_found;
+    Msg =:= payload_encode_schema_not_found;
+    Msg =:= payload_decode_schema_failure;
+    Msg =:= payload_encode_schema_failure;
+    Msg =:= payload_decode_error;
+    Msg =:= validation_failed;
+    Msg =:= validation_sql_check_throw;
+    Msg =:= validation_sql_check_failure;
+    Msg =:= validation_schema_check_schema_not_found;
+    Msg =:= validation_schema_check_failure
+->
     new_throttler(Msg, #{});
 new_throttler(Msg) ->
     new_throttler(Msg, ?NEW_SEQ).

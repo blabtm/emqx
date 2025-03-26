@@ -469,7 +469,7 @@ str(S) when is_list(S) -> S;
 str(S) when is_binary(S) -> binary_to_list(S).
 
 json(B) when is_binary(B) ->
-    case emqx_utils_json:safe_decode(B, [return_maps]) of
+    case emqx_utils_json:safe_decode(B) of
         {ok, Term} ->
             Term;
         {error, Reason} = Error ->
@@ -1359,7 +1359,7 @@ t_cascade_delete_actions(Config) ->
         uri([?ACTIONS_ROOT, BridgeID]),
         Config
     ),
-    ?assertMatch(#{<<"rules">> := [_ | _]}, emqx_utils_json:decode(Body, [return_maps])),
+    ?assertMatch(#{<<"rules">> := [_ | _]}, emqx_utils_json:decode(Body)),
     {ok, 200, [_]} = request_json(get, uri([?ACTIONS_ROOT]), Config),
     %% Cleanup
     {ok, 204, _} = request(
@@ -1404,7 +1404,7 @@ t_bad_name(Config) ->
     ),
     ?assertMatch({ok, 400, #{<<"message">> := _}}, Res),
     {ok, 400, #{<<"message">> := Msg0}} = Res,
-    Msg = emqx_utils_json:decode(Msg0, [return_maps]),
+    Msg = emqx_utils_json:decode(Msg0),
     ?assertMatch(
         #{
             <<"kind">> := <<"validation_error">>,
@@ -1884,86 +1884,6 @@ t_kind_dependencies(Config) when is_list(Config) ->
     ),
     ok.
 
-%% Verifies that we return thrown messages as is to the API.
-t_thrown_messages(matrix) ->
-    [
-        [single, actions],
-        [single, sources]
-    ];
-t_thrown_messages(Config) when is_list(Config) ->
-    meck:expect(?CONNECTOR_IMPL, on_remove_channel, fun(_ConnResId, ConnState, _ActionResid) ->
-        timer:sleep(20_000),
-        {ok, ConnState}
-    end),
-    ?check_trace(
-        begin
-            [_SingleOrCluster, Kind | _] = group_path(Config),
-            ConnectorType = ?SOURCE_CONNECTOR_TYPE,
-            ConnectorName = <<"c">>,
-            {ok, {{_, 201, _}, _, _}} =
-                emqx_bridge_v2_testlib:create_connector_api([
-                    {connector_config, source_connector_create_config(#{})},
-                    {connector_name, ConnectorName},
-                    {connector_type, ConnectorType}
-                ]),
-            do_t_thrown_messages(Kind, Config, ConnectorName),
-            meck:expect(?CONNECTOR_IMPL, on_remove_channel, 3, {ok, connector_state}),
-            ok
-        end,
-        []
-    ),
-    ok.
-
-do_t_thrown_messages(actions, _Config, ConnectorName) ->
-    Name = <<"a1">>,
-    %% MQTT
-    Type = ?SOURCE_TYPE,
-    CreateConfig = mqtt_action_create_config(#{
-        <<"connector">> => ConnectorName
-    }),
-    {201, _} = create_action_api(
-        Name,
-        Type,
-        CreateConfig
-    ),
-    UpdateConfig = maps:remove(<<"type">>, CreateConfig),
-    ?assertMatch(
-        {503, #{
-            <<"message">> :=
-                #{<<"reason">> := <<"Timed out trying to remove", _/binary>>}
-        }},
-        update_action_api(
-            Name,
-            Type,
-            UpdateConfig
-        )
-    ),
-    ok;
-do_t_thrown_messages(sources, _Config, ConnectorName) ->
-    Name = <<"s1">>,
-    Type = ?SOURCE_TYPE,
-    CreateConfig = source_create_config(#{
-        <<"connector">> => ConnectorName
-    }),
-    {201, _} = create_source_api(
-        Name,
-        Type,
-        CreateConfig
-    ),
-    UpdateConfig = maps:remove(<<"type">>, CreateConfig),
-    ?assertMatch(
-        {503, #{
-            <<"message">> :=
-                #{<<"reason">> := <<"Timed out trying to remove", _/binary>>}
-        }},
-        update_source_api(
-            Name,
-            Type,
-            UpdateConfig
-        )
-    ),
-    ok.
-
 t_summary(matrix) ->
     [
         [single, actions],
@@ -1981,9 +1901,11 @@ t_summary(Config) when is_list(Config) ->
     ?assertMatch(
         {200, [
             #{
-                <<"enabled">> := true,
+                <<"enable">> := true,
                 <<"name">> := Name,
                 <<"type">> := Type,
+                <<"description">> := _,
+                <<"created_at">> := _,
                 <<"last_modified_at">> := _,
                 <<"node_status">> := [
                     #{
@@ -2033,9 +1955,11 @@ t_summary_inconsistent(Config) when is_list(Config) ->
     ?assertMatch(
         {200, [
             #{
-                <<"enabled">> := true,
+                <<"enable">> := true,
                 <<"name">> := Name,
                 <<"type">> := Type,
+                <<"description">> := _,
+                <<"created_at">> := _,
                 <<"last_modified_at">> := _,
                 <<"node_status">> := [
                     #{
@@ -2057,4 +1981,50 @@ t_summary_inconsistent(Config) when is_list(Config) ->
         ]},
         Summarize()
     ),
+    ok.
+
+%% Checks that we can delete an action/source when a source/action with the same name and
+%% connector is referenced by a rule.
+t_delete_when_dual_has_dependencies(matrix) ->
+    [
+        [single, actions],
+        [single, sources]
+    ];
+t_delete_when_dual_has_dependencies(Config) when is_list(Config) ->
+    [_SingleOrCluster, Kind | _] = group_path(Config),
+    %% This particular source type happens to serve both actions and sources
+    ConnectorType = ?SOURCE_CONNECTOR_TYPE,
+    ConnectorName = <<"c">>,
+    {ok, {{_, 201, _}, _, _}} =
+        emqx_bridge_v2_testlib:create_connector_api([
+            {connector_config, source_connector_create_config(#{})},
+            {connector_name, ConnectorName},
+            {connector_type, ConnectorType}
+        ]),
+    ActionName = <<"same_name">>,
+    ActionType = ?SOURCE_TYPE,
+    ActionConfig = mqtt_action_create_config(#{<<"connector">> => ConnectorName}),
+    {201, _} = create_action_api(ActionName, ActionType, ActionConfig),
+    SourceName = ActionName,
+    SourceType = ?SOURCE_TYPE,
+    SourceConfig = source_create_config(#{<<"connector">> => ConnectorName}),
+    {201, _} = create_source_api(SourceName, SourceType, SourceConfig),
+
+    %% We'll use `Kind' to choose which kind will have dependencies.
+    %% We then attempt to delete the kind which is dual to `Kind'.
+    case Kind of
+        actions ->
+            {ok, _} = create_action_rule(ActionType, ActionName),
+            ?assertMatch(
+                {204, _},
+                emqx_bridge_v2_testlib:delete_kind_api(source, SourceType, SourceName)
+            );
+        sources ->
+            {ok, _} = create_source_rule1(SourceType, SourceName),
+            ?assertMatch(
+                {204, _},
+                emqx_bridge_v2_testlib:delete_kind_api(action, ActionType, ActionName)
+            )
+    end,
+
     ok.

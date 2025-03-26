@@ -465,7 +465,8 @@ param_path_id() ->
             {404, #{code => 'NOT_FOUND', message => <<"Rule Id Not Found">>}}
     end;
 '/rules/:id'(put, #{bindings := #{id := Id}, body := Params0}) ->
-    Params = filter_out_request_body(Params0),
+    Params1 = filter_out_request_body(Params0),
+    Params = ensure_last_modified_at(Params1),
     ConfPath = ?RULE_PATH(Id),
     case emqx_conf:update(ConfPath, Params, #{override_to => cluster}) of
         {ok, #{post_config_update := #{emqx_rule_engine := Rule}}} ->
@@ -553,7 +554,7 @@ err_msg(Msg) ->
 encode_nested_error(RuleError, Reason) when is_tuple(Reason) ->
     encode_nested_error(RuleError, element(1, Reason));
 encode_nested_error(RuleError, Reason) ->
-    case emqx_utils_json:safe_encode([{RuleError, Reason}]) of
+    case emqx_utils_json:safe_encode(#{RuleError => Reason}) of
         {ok, Json} ->
             Json;
         _ ->
@@ -566,6 +567,7 @@ format_rule_info_resp(#{
     id := Id,
     name := Name,
     created_at := CreatedAt,
+    updated_at := LastModifiedAt,
     from := Topics,
     actions := Action,
     sql := SQL,
@@ -580,6 +582,7 @@ format_rule_info_resp(#{
         sql => SQL,
         enable => Enable,
         created_at => format_datetime(CreatedAt, millisecond),
+        last_modified_at => format_datetime(LastModifiedAt, millisecond),
         description => Descr
     }.
 
@@ -719,9 +722,11 @@ do_aggregate_metrics(#{metrics := M1}, M0) ->
     ).
 
 add_metadata(Params) ->
+    NowMS = emqx_rule_engine:now_ms(),
     Params#{
         <<"metadata">> => #{
-            <<"created_at">> => emqx_rule_engine:now_ms()
+            <<"created_at">> => NowMS,
+            <<"last_modified_at">> => NowMS
         }
     }.
 
@@ -837,3 +842,9 @@ rule_engine_update(Params) ->
         {error, Reason} ->
             {error, Reason}
     end.
+
+ensure_last_modified_at(RawConfig) ->
+    emqx_utils_maps:deep_merge(
+        RawConfig,
+        #{<<"metadata">> => #{<<"last_modified_at">> => emqx_rule_engine:now_ms()}}
+    ).

@@ -80,13 +80,9 @@
 -export([set_field/3]).
 
 -export_type([
+    state/0,
     parser/0
 ]).
-
--import(
-    emqx_utils,
-    [start_timer/2]
-).
 
 -record(state, {
     %% TCP/TLS Transport
@@ -155,7 +151,7 @@
     next :: check_succ_handler()
 }).
 
--type state() :: #state{}.
+-opaque state() :: #state{}.
 -type pending_req() :: #pending_req{}.
 
 -define(ACTIVE_N, 10).
@@ -928,51 +924,48 @@ with_channel(Fun, Args, State = #state{channel = Channel}) ->
 
 handle_outgoing(Packets, State = #state{channel = _Channel}) ->
     Res = do_handle_outgoing(Packets, State),
-    ?EXT_TRACE_WITH_ACTION_STOP(
-        outgoing,
-        Packets,
-        emqx_channel:basic_trace_attrs(_Channel)
+    _ = ?EXT_TRACE_OUTGOING_STOP(
+        emqx_external_trace:basic_attrs(_Channel),
+        Packets
     ),
     Res.
 
 do_handle_outgoing(Packets, State) when is_list(Packets) ->
-    send(lists:map(serialize_and_inc_stats_fun(State), Packets), State);
+    send([serialize_and_inc_stats(State, Packet) || Packet <- Packets], State);
 do_handle_outgoing(Packet, State) ->
-    send((serialize_and_inc_stats_fun(State))(Packet), State).
+    send(serialize_and_inc_stats(State, Packet), State).
 
-serialize_and_inc_stats_fun(#state{serialize = Serialize}) ->
-    fun(Packet) ->
-        try emqx_frame:serialize_pkt(Packet, Serialize) of
-            <<>> ->
-                ?LOG(warning, #{
-                    msg => "packet_is_discarded",
-                    reason => "frame_is_too_large",
-                    packet => emqx_packet:format(Packet, hidden)
-                }),
-                ok = emqx_metrics:inc('delivery.dropped.too_large'),
-                ok = emqx_metrics:inc('delivery.dropped'),
-                ok = inc_outgoing_stats({error, message_too_large}),
-                <<>>;
-            Data ->
-                ?TRACE("MQTT", "mqtt_packet_sent", #{packet => Packet}),
-                ok = inc_outgoing_stats(Packet),
-                Data
-        catch
-            %% Maybe Never happen.
-            throw:{?FRAME_SERIALIZE_ERROR, Reason} ->
-                ?LOG(info, #{
-                    reason => Reason,
-                    input_packet => Packet
-                }),
-                erlang:error({?FRAME_SERIALIZE_ERROR, Reason});
-            error:Reason:Stacktrace ->
-                ?LOG(error, #{
-                    input_packet => Packet,
-                    exception => Reason,
-                    stacktrace => Stacktrace
-                }),
-                erlang:error(?FRAME_SERIALIZE_ERROR)
-        end
+serialize_and_inc_stats(#state{serialize = Serialize}, Packet) ->
+    try emqx_frame:serialize_pkt(Packet, Serialize) of
+        <<>> ->
+            ?LOG(warning, #{
+                msg => "packet_is_discarded",
+                reason => "frame_is_too_large",
+                packet => emqx_packet:format(Packet, hidden)
+            }),
+            ok = emqx_metrics:inc('delivery.dropped.too_large'),
+            ok = emqx_metrics:inc('delivery.dropped'),
+            ok = inc_outgoing_stats({error, message_too_large}),
+            <<>>;
+        Data ->
+            ?TRACE("MQTT", "mqtt_packet_sent", #{packet => Packet}),
+            ok = inc_outgoing_stats(Packet),
+            Data
+    catch
+        %% Maybe Never happen.
+        throw:{?FRAME_SERIALIZE_ERROR, Reason} ->
+            ?LOG(info, #{
+                reason => Reason,
+                input_packet => Packet
+            }),
+            erlang:error({?FRAME_SERIALIZE_ERROR, Reason});
+        error:Reason:Stacktrace ->
+            ?LOG(error, #{
+                input_packet => Packet,
+                exception => Reason,
+                stacktrace => Stacktrace
+            }),
+            erlang:error(?FRAME_SERIALIZE_ERROR)
     end.
 
 %%--------------------------------------------------------------------
@@ -1247,6 +1240,8 @@ activate_socket(State) ->
 
 close_socket(State = #state{sockstate = closed}) ->
     State;
+close_socket(State = #state{transport = emqx_quic_stream, sockstate = read_aborted}) ->
+    wait_for_quic_stream_close(State);
 close_socket(State = #state{transport = Transport, socket = Socket}) ->
     ok = Transport:fast_close(Socket),
     State#state{sockstate = closed}.
@@ -1344,17 +1339,35 @@ set_tcp_keepalive({Type, Id}) ->
 
 -spec graceful_shutdown_transport(atom(), state()) -> state().
 graceful_shutdown_transport(
-    kicked,
+    Reason,
     S = #state{
         transport = emqx_quic_stream,
         socket = Socket
     }
-) ->
-    _ = emqx_quic_stream:shutdown(Socket, read_write, 1000),
-    S#state{sockstate = closed};
+) when Reason =:= takenover; Reason =:= kicked; Reason =:= discarded ->
+    _ = emqx_quic_stream:abort_read(Socket, Reason),
+    S#state{sockstate = read_aborted};
 graceful_shutdown_transport(_Reason, S = #state{transport = Transport, socket = Socket}) ->
     _ = Transport:shutdown(Socket, read_write),
     S#state{sockstate = closed}.
+
+%% @doc wait for stream close or stream read shutdown complete
+%%      this also ensures write shutdown are completed.
+%%      see emqx_quic_stream:abort_read/2
+%% @end
+-spec wait_for_quic_stream_close(state()) -> state().
+wait_for_quic_stream_close(
+    State = #state{
+        transport = emqx_quic_stream,
+        socket = {quic, _Conn, Stream, _},
+        sockstate = read_aborted
+    }
+) ->
+    ok = emqx_quic_stream:wait_for_close(Stream),
+    State#state{sockstate = closed}.
+
+start_timer(Time, Msg) ->
+    emqx_utils:start_timer(Time, Msg).
 
 %%--------------------------------------------------------------------
 %% For CT tests

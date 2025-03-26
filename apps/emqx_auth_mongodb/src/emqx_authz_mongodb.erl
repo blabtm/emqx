@@ -23,7 +23,6 @@
 
 %% AuthZ Callbacks
 -export([
-    description/0,
     create/1,
     update/1,
     destroy/1,
@@ -36,9 +35,6 @@
 -endif.
 
 -define(ALLOWED_VARS, ?AUTHZ_DEFAULT_ALLOWED_VARS).
-
-description() ->
-    "AuthZ with MongoDB".
 
 create(#{filter := Filter, skip := Skip, limit := Limit} = Source) ->
     ResourceId = emqx_authz_utils:make_resource_id(?MODULE),
@@ -101,13 +97,13 @@ authorize(
 authorize_with_filter(RenderedFilter, Client, Action, Topic, #{
     collection := Collection,
     annotations := #{
-        skip := Skip, limit := Limit, id := ResourceID, cache_key_template := CacheKeyTemplate
+        skip := Skip, limit := Limit, id := ResourceId, cache_key_template := CacheKeyTemplate
     }
 }) ->
     Options = #{skip => Skip, limit => Limit},
     CacheKey = emqx_auth_template:cache_key(Client, CacheKeyTemplate),
     Result = emqx_authz_utils:cached_simple_sync_query(
-        CacheKey, ResourceID, {find, Collection, RenderedFilter, Options}
+        CacheKey, ResourceId, {find, Collection, RenderedFilter, Options}
     ),
     case Result of
         {error, Reason} ->
@@ -117,7 +113,7 @@ authorize_with_filter(RenderedFilter, Client, Action, Topic, #{
                 collection => Collection,
                 filter => RenderedFilter,
                 options => Options,
-                resource_id => ResourceID
+                resource_id => ResourceId
             }),
             nomatch;
         {ok, Rows} ->
@@ -127,8 +123,8 @@ authorize_with_filter(RenderedFilter, Client, Action, Topic, #{
 
 parse_rule(Row) ->
     case emqx_authz_rule_raw:parse_rule(Row) of
-        {ok, {Permission, Action, Topics}} ->
-            [emqx_authz_rule:compile({Permission, all, Action, Topics})];
+        {ok, {Permission, Who, Action, Topics}} ->
+            [emqx_authz_rule:compile({Permission, Who, Action, Topics})];
         {error, Reason} ->
             ?SLOG(error, #{
                 msg => "parse_rule_error",

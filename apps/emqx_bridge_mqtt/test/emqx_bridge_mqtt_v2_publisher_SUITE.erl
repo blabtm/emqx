@@ -24,6 +24,7 @@
 -include_lib("emqx/include/asserts.hrl").
 -include_lib("common_test/include/ct.hrl").
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
+-include_lib("emqx_utils/include/emqx_message.hrl").
 
 -import(emqx_common_test_helpers, [on_exit/1]).
 
@@ -162,6 +163,8 @@ connector_config(Overrides) ->
         <<"description">> => <<"my connector">>,
         <<"pool_size">> => 3,
         <<"proto_ver">> => <<"v5">>,
+        <<"clean_start">> => true,
+        <<"connect_timeout">> => <<"5s">>,
         <<"server">> => <<"127.0.0.1:1883">>,
         <<"resource_opts">> => #{
             <<"health_check_interval">> => <<"1s">>,
@@ -254,6 +257,25 @@ connect_client(Node) ->
     on_exit(fun() -> catch emqtt:stop(C) end),
     {ok, _} = emqtt:connect(C),
     C.
+
+get_stats_http() ->
+    {200, Res} = emqx_bridge_v2_testlib:get_stats_http(),
+    lists:foldl(
+        fun(#{<<"node">> := N} = R, Acc) -> Acc#{N => R} end,
+        #{},
+        Res
+    ).
+
+get_emqtt_clients(PoolName) ->
+    lists:filtermap(
+        fun({_Id, Worker}) ->
+            case ecpool_worker:client(Worker) of
+                {ok, Client} -> {true, Client};
+                _ -> false
+            end
+        end,
+        ecpool:workers(PoolName)
+    ).
 
 %%------------------------------------------------------------------------------
 %% Testcases
@@ -487,4 +509,270 @@ t_forward_user_properties(Config) ->
         [{<<"k1">>, <<"v1">>}, {<<"k2">>, <<"v2">>}],
         UserProps1
     ),
+    ok.
+
+%% Verifies that `emqtt' clients automatically try to reconnect once disconnected.
+t_reconnect(Config) ->
+    PoolSize = 3,
+    ?check_trace(
+        begin
+            {201, _} = create_connector_api(Config, #{
+                <<"pool_size">> => PoolSize
+            }),
+            NBin = atom_to_binary(node()),
+            ?retry(
+                500,
+                20,
+                ?assertMatch(
+                    #{NBin := #{<<"live_connections.count">> := PoolSize}},
+                    get_stats_http()
+                )
+            ),
+            ClientIds0 = emqx_cm:all_client_ids(),
+            ClientIds = lists:droplast(ClientIds0),
+            ChanPids0 = emqx_cm:all_channels(),
+            ChanPids = lists:droplast(ChanPids0),
+            lists:foreach(fun(Pid) -> monitor(process, Pid) end, ChanPids),
+            ct:pal("kicking ~p (leaving 1 client alive)", [ClientIds]),
+            {204, _} = emqx_bridge_v2_testlib:kick_clients_http(ClientIds),
+            DownPids = emqx_utils:drain_down(PoolSize - 1),
+            ?assertEqual(lists:sort(ChanPids), lists:sort(DownPids)),
+            %% Recovery
+            ct:pal("clients kicked; waiting for recovery..."),
+            ?retry(
+                500,
+                20,
+                ?assertMatch(
+                    #{NBin := #{<<"live_connections.count">> := PoolSize}},
+                    get_stats_http()
+                )
+            ),
+            ConnResId = emqx_bridge_v2_testlib:connector_resource_id(Config),
+            ?assertEqual(PoolSize, length(ecpool:workers(ConnResId))),
+            ?retry(500, 40, ?assertEqual(PoolSize, length(get_emqtt_clients(ConnResId)))),
+            ok
+        end,
+        []
+    ),
+    ok.
+
+%% Verifies we validate duplicate clientids amongst different connectors as well, to avoid
+%% dumb mistakes like reusing the same clientid multiple times.
+t_duplicate_static_clientids_different_connectors(Config) ->
+    NodeBin = atom_to_binary(node()),
+    {201, _} = create_connector_api(Config, #{
+        <<"static_clientids">> => [#{<<"node">> => NodeBin, <<"ids">> => [<<"1">>]}]
+    }),
+    ?assertMatch(
+        {400, #{
+            <<"message">> := #{
+                <<"kind">> := <<"validation_error">>,
+                <<"reason">> :=
+                    <<
+                        "distinct mqtt connectors must not use the same static clientids;"
+                        " connectors with duplicate static clientids: ",
+                        _/binary
+                    >>
+            }
+        }},
+        create_connector_api([{connector_name, <<"another">>} | Config], #{
+            <<"static_clientids">> => [#{<<"node">> => NodeBin, <<"ids">> => [<<"1">>]}]
+        })
+    ),
+    %% Using a different host is fine (different IPs and hostnames may still lead to the
+    %% same cluster, it's a best effort check)
+    ?assertMatch(
+        {201, _},
+        create_connector_api([{connector_name, <<"another">>} | Config], #{
+            <<"server">> => <<"a-different-host:1883">>,
+            <<"static_clientids">> => [#{<<"node">> => NodeBin, <<"ids">> => [<<"1">>]}]
+        })
+    ),
+    ok.
+
+%% Checks the race condition where the action is deemed healthy, but the MQTT client has
+%% concurrently been disconnected (and, due to a race, `emqtt' gets either a `{error,
+%% closed}' or `{error, tcp_closed}' error message).  We should retry.
+t_publish_while_tcp_closed_concurrently(Config) ->
+    PoolSize = 3,
+    ?check_trace(
+        begin
+            ?force_ordering(
+                #{?snk_kind := call_query_enter},
+                #{?snk_kind := "kill_clients", ?snk_span := start}
+            ),
+            ?force_ordering(
+                #{?snk_kind := "kill_clients", ?snk_span := {complete, _}},
+                #{?snk_kind := "mqtt_action_about_to_publish"}
+            ),
+
+            TestClientid = <<"testclientid">>,
+
+            spawn_link(fun() ->
+                ?tp_span(
+                    "kill_clients",
+                    #{},
+                    begin
+                        ClientIds0 = [_, _ | _] = emqx_cm:all_client_ids(),
+                        ChanPids0 = [_, _ | _] = emqx_cm:all_channels(),
+                        ClientidsChanPids0 = lists:zip(ClientIds0, ChanPids0),
+                        ClientidsChanPids = lists:filter(
+                            fun({CId, _Pid}) ->
+                                CId /= TestClientid
+                            end,
+                            ClientidsChanPids0
+                        ),
+                        {ClientidsToKick, ChanPids} = lists:unzip(ClientidsChanPids),
+                        lists:foreach(fun(Pid) -> monitor(process, Pid) end, ChanPids),
+                        ct:pal("kicking ~p", [ClientidsToKick]),
+                        %% Forcefully kill connection processes, so we get the ellusive `tcp_closed'
+                        %% error more easily from `emqtt'.
+                        lists:foreach(fun(ChanPid) -> ChanPid ! die_if_test end, ChanPids),
+                        _DownPids = emqx_utils:drain_down(PoolSize),
+
+                        ok
+                    end
+                )
+            end),
+
+            {201, _} = create_connector_api(Config, #{
+                %% Should usually be `true', but we allow `false', despite the potential
+                %% issues with duplication of messages and loss of client state.
+                <<"clean_start">> => false,
+                <<"pool_size">> => PoolSize,
+                <<"resource_opts">> => #{<<"health_check_interval">> => <<"15s">>}
+            }),
+            {201, #{<<"parameters">> := #{<<"topic">> := RemoteTopic}}} =
+                create_action_api(
+                    Config,
+                    #{
+                        <<"parameters">> => #{<<"qos">> => ?QOS_2},
+                        <<"resource_opts">> => #{<<"health_check_interval">> => <<"15s">>}
+                    }
+                ),
+
+            RuleTopic = <<"rule/republish">>,
+            {ok, _} = create_rule_and_action_http(Config, RuleTopic, #{}),
+
+            {ok, C} = emqtt:start_link(#{proto_ver => v5, clientid => TestClientid}),
+            {ok, _} = emqtt:connect(C),
+            on_exit(fun() -> emqtt:stop(C) end),
+            {ok, _, [?RC_GRANTED_QOS_2]} = emqtt:subscribe(C, RemoteTopic, [{qos, ?QOS_2}]),
+
+            {ok, _} = emqtt:publish(C, RuleTopic, <<"hey">>, [{qos, ?QOS_2}]),
+
+            ?assertReceive({publish, #{topic := RemoteTopic}}, 5_000),
+
+            ok
+        end,
+        fun(Trace) ->
+            %% Connection being closed forcefully should induce a retry
+            ?assertMatch([_ | _], ?of_kind(buffer_worker_retry_inflight, Trace)),
+            ok
+        end
+    ),
+    ok.
+
+%% Smoke integration test to check that fallback action are triggered.  This Action is
+%% chosen for this test because it uses the conventional builtin buffer.
+t_fallback_actions(Config) ->
+    {201, _} = create_connector_api(Config, _Overrides = #{}),
+    RepublishTopic = <<"republish/fallback">>,
+    RepublishArgs = #{
+        <<"topic">> => RepublishTopic,
+        <<"qos">> => 1,
+        <<"retain">> => false,
+        <<"payload">> => <<"${payload}">>,
+        <<"mqtt_properties">> => #{},
+        <<"user_properties">> => <<"${pub_props.'User-Property'}">>,
+        <<"direct_dispatch">> => false
+    },
+    {201, _} =
+        create_action_api(
+            Config,
+            #{
+                <<"fallback_actions">> => [
+                    #{
+                        <<"kind">> => <<"republish">>,
+                        <<"args">> => RepublishArgs
+                    }
+                ],
+                %% Simple way to make the requests fail: make the buffer overflow
+                <<"resource_opts">> => #{
+                    <<"max_buffer_bytes">> => <<"0B">>,
+                    <<"buffer_seg_bytes">> => <<"0B">>
+                }
+            }
+        ),
+    RuleTopic = <<"fallback/actions">>,
+    {ok, _} = create_rule_and_action_http(
+        Config,
+        RuleTopic,
+        #{}
+    ),
+    {ok, C} = emqtt:start_link(#{proto_ver => v5}),
+    {ok, _} = emqtt:connect(C),
+    on_exit(fun() -> emqtt:stop(C) end),
+    {ok, _, [?RC_GRANTED_QOS_1]} = emqtt:subscribe(C, RepublishTopic, 1),
+    Payload = emqx_utils_json:encode(#{
+        <<"k">> => <<"aaaaaaaaaaaaaaaaa">>
+    }),
+    {ok, _} = emqtt:publish(C, RuleTopic, Payload, [{qos, ?QOS_1}]),
+    ?assertReceive({publish, #{topic := RepublishTopic, payload := Payload}}),
+    ok.
+
+%% Checks that we can start a node with a config with a republish action (essentially,
+%% `emqx_config:init_load' accepts it).g
+t_fallback_actions_load_config(Config) ->
+    ConnectorType = ?config(connector_type, Config),
+    ConnectorName = ?config(connector_name, Config),
+    ConnectorConfig = ?config(connector_config, Config),
+    ActionType = ?config(action_type, Config),
+    ActionName = ?config(action_name, Config),
+    ActionConfig0 = ?config(action_config, Config),
+    RepublishTopic = <<"republish/fallback">>,
+    RepublishArgs = #{
+        <<"topic">> => RepublishTopic,
+        <<"qos">> => 1,
+        <<"retain">> => false,
+        <<"payload">> => <<"${payload}">>,
+        <<"mqtt_properties">> => #{},
+        <<"user_properties">> => <<"${pub_props.'User-Property'}">>,
+        <<"direct_dispatch">> => false
+    },
+    ActionConfig = emqx_utils_maps:deep_merge(
+        ActionConfig0,
+        #{
+            <<"fallback_actions">> => [
+                #{
+                    <<"kind">> => <<"republish">>,
+                    <<"args">> => RepublishArgs
+                }
+            ],
+            %% Simple way to make the requests fail: make the buffer overflow
+            <<"resource_opts">> => #{
+                <<"max_buffer_bytes">> => <<"0B">>,
+                <<"buffer_seg_bytes">> => <<"0B">>
+            }
+        }
+    ),
+    Hocon = #{
+        <<"connectors">> => #{ConnectorType => #{ConnectorName => ConnectorConfig}},
+        <<"actions">> => #{ActionType => #{ActionName => ActionConfig}}
+    },
+    AppSpecs = [
+        emqx,
+        emqx_conf,
+        emqx_connector,
+        emqx_bridge_mqtt,
+        {emqx_bridge, #{config => Hocon}},
+        emqx_rule_engine,
+        emqx_management
+    ],
+    %% Simply successfully starting the nodes is enough.
+    Nodes = emqx_cth_cluster:start(
+        [{bridge_fallback_actions, #{role => core, apps => AppSpecs}}],
+        #{work_dir => emqx_cth_suite:work_dir(?FUNCTION_NAME, Config)}
+    ),
+    ok = emqx_cth_cluster:stop(Nodes),
     ok.

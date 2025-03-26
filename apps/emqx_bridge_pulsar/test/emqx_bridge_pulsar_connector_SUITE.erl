@@ -53,7 +53,7 @@ only_once_tests() ->
 
 init_per_suite(Config) ->
     %% Ensure enterprise bridge module is loaded
-    _ = emqx_bridge_enterprise:module_info(),
+    emqx_utils:interactive_load(emqx_bridge_enterprise),
     %% TODO
     %% This is needed to ensure that filenames generated deep inside pulsar/replayq
     %% will not exceed 256 characters, because replayq eventually turns them into atoms.
@@ -294,7 +294,7 @@ create_bridge(Config, Overrides) ->
     Name = ?config(pulsar_name, Config),
     PulsarConfig0 = ?config(pulsar_config, Config),
     PulsarConfig = emqx_utils_maps:deep_merge(PulsarConfig0, Overrides),
-    emqx_bridge:create(Type, Name, PulsarConfig).
+    emqx_bridge_testlib:create_bridge_api(Type, Name, PulsarConfig).
 
 delete_bridge(Config) ->
     Type = ?BRIDGE_TYPE_BIN,
@@ -317,7 +317,9 @@ create_bridge_api(Config, Overrides) ->
     Res =
         case emqx_mgmt_api_test_util:request_api(post, Path, "", AuthHeader, Params, Opts) of
             {ok, {Status, Headers, Body0}} ->
-                {ok, {Status, Headers, emqx_utils_json:decode(Body0, [return_maps])}};
+                TypeV1 = emqx_action_info:bridge_v1_type_to_action_type(TypeBin),
+                _ = emqx_bridge_v2_testlib:kickoff_action_health_check(TypeV1, Name),
+                {ok, {Status, Headers, emqx_utils_json:decode(Body0)}};
             {error, {Status, Headers, Body0}} ->
                 {error, {Status, Headers, emqx_bridge_testlib:try_decode_error(Body0)}};
             Error ->
@@ -342,7 +344,7 @@ update_bridge_api(Config, Overrides) ->
     ct:pal("updating bridge (via http): ~p", [Params]),
     Res =
         case emqx_mgmt_api_test_util:request_api(put, Path, "", AuthHeader, Params, Opts) of
-            {ok, {_Status, _Headers, Body0}} -> {ok, emqx_utils_json:decode(Body0, [return_maps])};
+            {ok, {_Status, _Headers, Body0}} -> {ok, emqx_utils_json:decode(Body0)};
             Error -> Error
         end,
     ct:pal("bridge update result: ~p", [Res]),
@@ -484,7 +486,7 @@ create_rule_and_action_http(Config) ->
     AuthHeader = emqx_mgmt_api_test_util:auth_header_(),
     ct:pal("rule action params: ~p", [Params]),
     case emqx_mgmt_api_test_util:request_api(post, Path, "", AuthHeader, Params) of
-        {ok, Res} -> {ok, emqx_utils_json:decode(Res, [return_maps])};
+        {ok, Res} -> {ok, emqx_utils_json:decode(Res)};
         Error -> Error
     end.
 
@@ -504,7 +506,7 @@ flush_consumed() ->
     end.
 
 try_decode_json(Payload) ->
-    case emqx_utils_json:safe_decode(Payload, [return_maps]) of
+    case emqx_utils_json:safe_decode(Payload) of
         {error, _} ->
             Payload;
         {ok, JSON} ->
@@ -512,13 +514,18 @@ try_decode_json(Payload) ->
     end.
 
 cluster(Config) ->
-    Apps = [
-        {emqx, #{override_env => [{boot_modules, [broker]}]}}
-        | ?APPS
-    ],
+    Apps = [emqx | ?APPS],
     Nodes = emqx_cth_cluster:start(
         [
-            {emqx_bridge_pulsar_impl_producer1, #{apps => Apps}},
+            {emqx_bridge_pulsar_impl_producer1, #{
+                apps => Apps ++
+                    [
+                        emqx_management,
+                        emqx_mgmt_api_test_util:emqx_dashboard(
+                            "dashboard.listeners.http.bind = 28083"
+                        )
+                    ]
+            }},
             {emqx_bridge_pulsar_impl_producer2, #{apps => Apps}}
         ],
         #{work_dir => emqx_cth_suite:work_dir(Config)}
@@ -1015,7 +1022,7 @@ t_resource_manager_crash_after_producers_started(Config) ->
             end),
             %% even if the resource manager is dead, we can still
             %% clear the allocated resources.
-            {{error, {config_update_crashed, {killed, _}}}, {ok, _}} =
+            {_, {ok, _}} =
                 ?wait_async_action(
                     create_bridge(Config),
                     #{?snk_kind := pulsar_bridge_stopped, instance_id := InstanceId} when
@@ -1023,7 +1030,6 @@ t_resource_manager_crash_after_producers_started(Config) ->
                     10_000
                 ),
             ?assertEqual([], get_pulsar_producers()),
-            ?assertMatch({error, bridge_not_found}, delete_bridge(Config)),
             ok
         end,
         []
@@ -1049,14 +1055,13 @@ t_resource_manager_crash_before_producers_started(Config) ->
             end),
             %% even if the resource manager is dead, we can still
             %% clear the allocated resources.
-            {{error, {config_update_crashed, _}}, {ok, _}} =
+            {_, {ok, _}} =
                 ?wait_async_action(
                     create_bridge(Config),
                     #{?snk_kind := pulsar_bridge_stopped},
                     10_000
                 ),
             ?assertEqual([], get_pulsar_producers()),
-            ?assertMatch({error, bridge_not_found}, delete_bridge(Config)),
             ok
         end,
         []

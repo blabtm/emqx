@@ -141,7 +141,7 @@ create_rule_http(RuleParams, Overrides) ->
     AuthHeader = emqx_mgmt_api_test_util:auth_header_(),
     case emqx_mgmt_api_test_util:request_api(post, Path, "", AuthHeader, Params) of
         {ok, Res0} ->
-            Res = #{<<"id">> := RuleId} = emqx_utils_json:decode(Res0, [return_maps]),
+            Res = #{<<"id">> := RuleId} = emqx_utils_json:decode(Res0),
             on_exit(fun() -> ok = emqx_rule_engine:delete_rule(RuleId) end),
             {ok, Res};
         Error ->
@@ -376,7 +376,7 @@ receive_published(Line) ->
             maps:update_with(
                 payload,
                 fun(Raw) ->
-                    case emqx_utils_json:safe_decode(Raw, [return_maps]) of
+                    case emqx_utils_json:safe_decode(Raw) of
                         {ok, Decoded} -> Decoded;
                         {error, _} -> Raw
                     end
@@ -848,15 +848,49 @@ t_import_config(_Config) ->
         RawConf,
         <<"Updated description">>
     ),
-    Path = [schema_registry, schemas, my_avro_schema],
+    %% Config without old schema, should be merged with previous schemas.
+    RawConf2 = #{
+        <<"schema_registry">> =>
+            #{
+                <<"schemas">> =>
+                    #{
+                        <<"my_json_schema">> =>
+                            #{
+                                <<"description">> => <<"My Json Schema">>,
+                                <<"source">> => emqx_utils_json:encode(#{
+                                    <<"$schema">> => <<"http://json-schema.org/draft-06/schema#">>,
+                                    <<"type">> => <<"object">>
+                                }),
+                                <<"type">> => <<"json">>
+                            }
+                    }
+            }
+    },
+    Path1 = [schema_registry, schemas, my_avro_schema],
+    Path2 = [schema_registry, schemas, my_json_schema],
     ?assertEqual(
-        {ok, #{root_key => schema_registry, changed => [Path]}},
+        {ok, #{root_key => schema_registry, changed => [Path1]}},
         emqx_schema_registry_config:import_config(RawConf)
     ),
     ?assertEqual(
-        {ok, #{root_key => schema_registry, changed => [Path]}},
+        {ok, #{root_key => schema_registry, changed => [Path1]}},
         emqx_schema_registry_config:import_config(RawConf1)
-    ).
+    ),
+    ?assertEqual(
+        {ok, #{root_key => schema_registry, changed => [Path2]}},
+        emqx_schema_registry_config:import_config(RawConf2)
+    ),
+    %% Both schemas should be present.
+    ?assertMatch(
+        #{
+            <<"schemas">> := #{
+                <<"my_avro_schema">> := #{<<"description">> := <<"Updated description">>},
+                <<"my_json_schema">> := #{<<"description">> := <<"My Json Schema">>}
+            }
+        },
+        emqx_config:get_raw([<<"schema_registry">>])
+    ),
+    ok.
 
 sparkplug_example_data_base64() ->
     <<

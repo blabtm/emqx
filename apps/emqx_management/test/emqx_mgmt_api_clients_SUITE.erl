@@ -23,6 +23,7 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("proper/include/proper.hrl").
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
+-include_lib("emqx/src/emqx_tracepoints.hrl").
 -include_lib("emqx/include/asserts.hrl").
 
 -define(HTTP200, {"HTTP/1.1", 200, "OK"}).
@@ -33,6 +34,8 @@
 
 -define(ON(NODE, BODY), erpc:call(NODE, fun() -> BODY end)).
 -define(assertContainsClientids(RES, EXPECTED), assert_contains_clientids(RES, EXPECTED, ?LINE)).
+
+-define(CLIENTID(SUFFIX), <<(atom_to_binary(?FUNCTION_NAME))/binary, "_", SUFFIX/binary>>).
 
 all() ->
     [
@@ -69,6 +72,7 @@ persistent_session_testcases() ->
         t_persistent_sessions6,
         t_persistent_sessions_subscriptions1,
         t_list_clients_v2,
+        t_list_clients_v2_limit,
         t_list_clients_v2_exact_filters,
         t_list_clients_v2_regular_filters,
         t_list_clients_v2_bad_query_string_parameters
@@ -103,27 +107,23 @@ init_per_group(general, Config) ->
         {api_auth_header, emqx_mgmt_api_test_util:auth_header_()}
         | Config
     ];
-init_per_group(persistent_sessions, Config) ->
+init_per_group(persistent_sessions, Config0) ->
     case emqx_ds_test_helpers:skip_if_norepl() of
         false ->
-            AppSpecs = [
-                {emqx,
-                    "durable_sessions.enable = true\n"
-                    "durable_sessions.disconnected_session_count_refresh_interval = 100ms"},
-                emqx_management
-            ],
+            DurableSessionsOpts = #{
+                <<"enable">> => true,
+                <<"disconnected_session_count_refresh_interval">> => <<"100ms">>
+            },
+            Opts = #{durable_sessions_opts => DurableSessionsOpts},
+            AppSpecs = [emqx_management],
             Dashboard = emqx_mgmt_api_test_util:emqx_dashboard(),
-            Cluster = [
+            ClusterSpecs = [
                 {emqx_mgmt_api_clients_SUITE1, #{apps => AppSpecs ++ [Dashboard]}},
                 {emqx_mgmt_api_clients_SUITE2, #{apps => AppSpecs}}
             ],
-            Nodes =
-                [N1 | _] = emqx_cth_cluster:start(
-                    Cluster,
-                    #{work_dir => emqx_cth_suite:work_dir(Config)}
-                ),
+            Config = emqx_common_test_helpers:start_cluster_ds(Config0, ClusterSpecs, Opts),
+            [N1 | _] = ?config(cluster_nodes, Config),
             [
-                {nodes, Nodes},
                 {api_auth_header, erpc:call(N1, emqx_mgmt_api_test_util, auth_header_, [])}
                 | Config
             ];
@@ -162,7 +162,11 @@ end_per_group(general, Config) ->
     Apps = ?config(apps, Config),
     ok = emqx_cth_suite:stop(Apps);
 end_per_group(Group, Config) when
-    Group =:= persistent_sessions;
+    Group =:= persistent_sessions
+->
+    emqx_common_test_helpers:stop_cluster_ds(Config),
+    ok;
+end_per_group(Group, Config) when
     Group =:= non_persistent_cluster
 ->
     Nodes = ?config(nodes, Config),
@@ -310,7 +314,7 @@ t_clients(Config) ->
     disconnect_and_destroy_session(C1).
 
 t_persistent_sessions1(Config) ->
-    [N1, _N2] = ?config(nodes, Config),
+    [N1, _N2] = ?config(cluster_nodes, Config),
     Port1 = get_mqtt_port(N1, tcp),
 
     ?assertMatch({ok, {?HTTP200, _, #{<<"data">> := []}}}, list_request(Config)),
@@ -349,7 +353,7 @@ t_persistent_sessions1(Config) ->
     ok.
 
 t_persistent_sessions2(Config) ->
-    [N1, _N2] = ?config(nodes, Config),
+    [N1, _N2] = ?config(cluster_nodes, Config),
     Port1 = get_mqtt_port(N1, tcp),
 
     ?assertMatch({ok, {?HTTP200, _, #{<<"data">> := []}}}, list_request(Config)),
@@ -373,7 +377,7 @@ t_persistent_sessions2(Config) ->
     ok.
 
 t_persistent_sessions3(Config) ->
-    [N1, N2] = ?config(nodes, Config),
+    [N1, N2] = ?config(cluster_nodes, Config),
     Port1 = get_mqtt_port(N1, tcp),
     Port2 = get_mqtt_port(N2, tcp),
 
@@ -407,7 +411,7 @@ t_persistent_sessions3(Config) ->
     ok.
 
 t_persistent_sessions4(Config) ->
-    [N1, N2] = ?config(nodes, Config),
+    [N1, N2] = ?config(cluster_nodes, Config),
     Port1 = get_mqtt_port(N1, tcp),
     Port2 = get_mqtt_port(N2, tcp),
 
@@ -449,7 +453,7 @@ t_persistent_sessions4(Config) ->
     ok.
 
 t_persistent_sessions5(Config) ->
-    [N1, N2] = ?config(nodes, Config),
+    [N1, N2] = ?config(cluster_nodes, Config),
     Port1 = get_mqtt_port(N1, tcp),
     Port2 = get_mqtt_port(N2, tcp),
 
@@ -568,7 +572,7 @@ t_persistent_sessions5(Config) ->
 
 %% Checks that expired durable sessions are returned with `is_expired => true'.
 t_persistent_sessions6(Config) ->
-    [N1, _N2] = ?config(nodes, Config),
+    [N1, _N2] = ?config(cluster_nodes, Config),
     Port1 = get_mqtt_port(N1, tcp),
 
     ?assertMatch({ok, {?HTTP200, _, #{<<"data">> := []}}}, list_request(Config)),
@@ -632,7 +636,7 @@ t_persistent_sessions6(Config) ->
 
 %% Check that the output of `/clients/:clientid/subscriptions' has the expected keys.
 t_persistent_sessions_subscriptions1(Config) ->
-    [N1, _N2] = ?config(nodes, Config),
+    [N1, _N2] = ?config(cluster_nodes, Config),
     Port1 = get_mqtt_port(N1, tcp),
 
     ?assertMatch({ok, {?HTTP200, _, #{<<"data">> := []}}}, list_request(Config)),
@@ -1593,7 +1597,7 @@ t_bulk_subscribe(Config) ->
     ok.
 
 t_list_clients_v2(Config) ->
-    [N1, N2] = ?config(nodes, Config),
+    [N1, N2] = ?config(cluster_nodes, Config),
     Port1 = get_mqtt_port(N1, tcp),
     Port2 = get_mqtt_port(N2, tcp),
 
@@ -1835,9 +1839,100 @@ t_list_clients_v2(Config) ->
     ),
     ok.
 
+t_list_clients_v2_limit(Config) ->
+    [N1, N2] = ?config(cluster_nodes, Config),
+    Port1 = get_mqtt_port(N1, tcp),
+    Port2 = get_mqtt_port(N2, tcp),
+    N1ClientIds = lists:map(
+        fun(N) ->
+            Suffix = <<"n1_", (integer_to_binary(N))/binary>>,
+            ?CLIENTID(Suffix)
+        end,
+        lists:seq(1, 5)
+    ),
+    N1Clients = lists:map(
+        fun(ClientId) ->
+            connect_client(#{
+                port => Port1,
+                clientid => ClientId,
+                clean_start => true
+            })
+        end,
+        N1ClientIds
+    ),
+    N2ClientIds = lists:map(
+        fun(N) ->
+            Suffix = <<"n2_", (integer_to_binary(N))/binary>>,
+            ?CLIENTID(Suffix)
+        end,
+        lists:seq(1, 5)
+    ),
+    N2Clients = lists:map(
+        fun(ClientId) ->
+            connect_client(#{
+                port => Port2,
+                clientid => ClientId,
+                clean_start => true
+            })
+        end,
+        N2ClientIds
+    ),
+    %% All clients are live and in ETS.
+    Limit = 8,
+    QueryParams1 = #{<<"limit">> => integer_to_binary(Limit)},
+    {ok, {{_, 200, _}, _, Res1}} = list_v2_request(QueryParams1, Config),
+    %% Current implementation does an `ets:select_reverse'...
+    NumN1Clients = length(N1ClientIds),
+    NumN2Clients = Limit - NumN1Clients,
+    N2ClientsToDrop = length(N2ClientIds) - NumN2Clients,
+    ?assert(N2ClientsToDrop > 0, #{n2_clients_to_drop_from_list => N2ClientsToDrop}),
+    ExpectedClientIds1 = N1ClientIds ++ lists:nthtail(N2ClientsToDrop, N2ClientIds),
+    ?assertContainsClientids([Res1], ExpectedClientIds1),
+    Res1A = list_all_v2(#{<<"limit">> => <<"8">>}, Config),
+    ?assertContainsClientids(Res1A, N1ClientIds ++ N2ClientIds),
+    Res1B = list_all_v2(#{<<"limit">> => <<"3">>}, Config),
+    ?assertContainsClientids(Res1B, N1ClientIds ++ N2ClientIds),
+    %% Some clients are now disconnected and mixed between ETS and DS.
+    ClientsToDisconnect = lists:nthtail(NumN2Clients, N2Clients),
+    lists:foreach(fun stop_and_commit/1, ClientsToDisconnect),
+    ct:sleep(200),
+    %% ETS iterates in reverse order, DS in direct order....
+    ExpectedClientIds2 = N1ClientIds ++ lists:sublist(N2ClientIds, NumN2Clients),
+    {ok, {{_, 200, _}, _, Res2}} = list_v2_request(QueryParams1, Config),
+    ?assertContainsClientids([Res2], ExpectedClientIds2),
+    %% All clients are disconnected and in DS.
+    MoreClientsToDisconnect = N1Clients ++ (N2Clients -- ClientsToDisconnect),
+    lists:foreach(fun stop_and_commit/1, MoreClientsToDisconnect),
+    ct:sleep(200),
+    {ok, {{_, 200, _}, _, Res3}} = list_v2_request(QueryParams1, Config),
+    ?assertContainsClientids([Res3], ExpectedClientIds2),
+    %% Clear persistent sessions
+    NewN1Clients = lists:map(
+        fun(ClientId) ->
+            connect_client(#{
+                port => Port1,
+                clientid => ClientId,
+                clean_start => true
+            })
+        end,
+        N1ClientIds
+    ),
+    NewN2Clients = lists:map(
+        fun(ClientId) ->
+            connect_client(#{
+                port => Port2,
+                clientid => ClientId,
+                clean_start => true
+            })
+        end,
+        N2ClientIds
+    ),
+    lists:foreach(fun disconnect_and_destroy_session/1, NewN1Clients ++ NewN2Clients),
+    ok.
+
 %% Checks that exact match filters (username) works in clients_v2 API.
 t_list_clients_v2_exact_filters(Config) ->
-    [N1, N2] = ?config(nodes, Config),
+    [N1, N2] = ?config(cluster_nodes, Config),
     Port1 = get_mqtt_port(N1, tcp),
     Port2 = get_mqtt_port(N2, tcp),
     Id = fun(Bin) -> iolist_to_binary([atom_to_binary(?FUNCTION_NAME), <<"-">>, Bin]) end,
@@ -1913,7 +2008,7 @@ t_list_clients_v2_exact_filters(Config) ->
 
 %% Checks that regular filters (non fuzzy and not username) work in clients_v2 API.
 t_list_clients_v2_regular_filters(Config) ->
-    [N1, _N2] = ?config(nodes, Config),
+    [N1, _N2] = ?config(cluster_nodes, Config),
     Port1 = get_mqtt_port(N1, tcp),
     Id = fun(Bin) -> iolist_to_binary([atom_to_binary(?FUNCTION_NAME), <<"-">>, Bin]) end,
     ?check_trace(
@@ -2083,7 +2178,7 @@ request(Method, Path, Params, QueryParams, Config) ->
             {ok, {Status, Headers, Body}};
         {error, {Status, Headers, Body0}} ->
             Body =
-                case emqx_utils_json:safe_decode(Body0, [return_maps]) of
+                case emqx_utils_json:safe_decode(Body0) of
                     {ok, Decoded0 = #{<<"message">> := Msg0}} ->
                         Msg = maybe_json_decode(Msg0),
                         Decoded0#{<<"message">> := Msg};
@@ -2098,7 +2193,7 @@ request(Method, Path, Params, QueryParams, Config) ->
     end.
 
 maybe_json_decode(X) ->
-    case emqx_utils_json:safe_decode(X, [return_maps]) of
+    case emqx_utils_json:safe_decode(X) of
         {ok, Decoded} -> Decoded;
         {error, _} -> X
     end.
@@ -2153,6 +2248,13 @@ do_list_all_v2(QueryParams, Config, Acc) ->
     case list_v2_request(QueryParams, Config) of
         {ok, {{_, 200, _}, _, Resp = #{<<"meta">> := #{<<"cursor">> := Cursor}}}} ->
             do_list_all_v2(QueryParams#{cursor => Cursor}, Config, [Resp | Acc]);
+        {ok, {{_, 200, _}, _, #{<<"data">> := []} = Resp}} ->
+            case Acc of
+                [] ->
+                    [Resp];
+                _ ->
+                    lists:reverse(Acc)
+            end;
         {ok, {{_, 200, _}, _, Resp}} ->
             lists:reverse([Resp | Acc]);
         Other ->
@@ -2299,6 +2401,6 @@ stop_and_commit(Client) ->
     {ok, {ok, _}} =
         ?wait_async_action(
             emqtt:stop(Client),
-            #{?snk_kind := persistent_session_ds_terminate}
+            #{?snk_kind := ?sessds_terminate}
         ),
     ok.

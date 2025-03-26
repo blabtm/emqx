@@ -38,9 +38,12 @@
     connector_examples/1
 ]).
 
--import(emqx_schema, [mk_duration/2]).
+%% `emqx_schema_hooks' API
+-export([injected_fields/0]).
 
--import(hoconsc, [mk/2, ref/2]).
+-export([
+    unique_static_clientid_validator/1
+]).
 
 -define(CONNECTOR_TYPE, mqtt).
 -define(MQTT_HOST_OPTS, #{default_port => 1883}).
@@ -139,6 +142,10 @@ fields("server_configs") ->
                 }
             )},
         {keepalive, mk_duration("MQTT Keepalive.", #{default => <<"160s">>})},
+        {connect_timeout,
+            mk(emqx_schema:timeout_duration_s(), #{
+                default => <<"10s">>, desc => ?DESC("connect_timeout")
+            })},
         {retry_interval,
             mk_duration(
                 "Message retry interval. Delay for the MQTT bridge to retry sending the QoS1/QoS2 "
@@ -370,6 +377,46 @@ desc(static_clientid_entry) ->
 desc(_) ->
     undefined.
 
+injected_fields() ->
+    #{
+        'connectors.validators' => [fun ?MODULE:unique_static_clientid_validator/1]
+    }.
+
+unique_static_clientid_validator(#{<<"mqtt">> := MQTTConnectors}) ->
+    StaticClientIdsToNames0 =
+        [
+            {{ClientId, Server}, Name}
+         || {Name, #{<<"static_clientids">> := CIdMappings, <<"server">> := Server}} <-
+                maps:to_list(MQTTConnectors),
+            #{<<"ids">> := ClientIds} <- CIdMappings,
+            ClientId <- ClientIds
+        ],
+    StaticClientIdsToNames =
+        maps:groups_from_list(
+            fun({CIdServer, _Name}) -> CIdServer end,
+            fun({_CIdServer, Name}) -> Name end,
+            StaticClientIdsToNames0
+        ),
+    Duplicated0 = maps:filter(fun(_, Vs) -> length(Vs) > 1 end, StaticClientIdsToNames),
+    Duplicated = maps:values(Duplicated0),
+    case Duplicated of
+        [] ->
+            ok;
+        [_ | _] ->
+            DuplicatedFormatted = format_duplicated_name_groups(Duplicated),
+            Msg =
+                iolist_to_binary(
+                    io_lib:format(
+                        "distinct mqtt connectors must not use the same static clientids;"
+                        " connectors with duplicate static clientids: ~s",
+                        [DuplicatedFormatted]
+                    )
+                ),
+            {error, Msg}
+    end;
+unique_static_clientid_validator(_) ->
+    ok.
+
 qos() ->
     hoconsc:union([emqx_schema:qos(), emqx_schema:template()]).
 
@@ -377,8 +424,50 @@ parse_server(Str) ->
     #{hostname := Host, port := Port} = emqx_schema:parse_server(Str, ?MQTT_HOST_OPTS),
     {Host, Port}.
 
-connector_examples(_Method) ->
-    [#{}].
+connector_examples(Method) ->
+    [
+        #{
+            <<"mqtt">> => #{
+                summary => <<"MQTT Connector">>,
+                value => connector_example(Method)
+            }
+        }
+    ].
+
+connector_example(get) ->
+    maps:merge(
+        connector_example(put),
+        #{
+            status => <<"connected">>,
+            node_status => [
+                #{
+                    node => <<"emqx@localhost">>,
+                    status => <<"connected">>
+                }
+            ]
+        }
+    );
+connector_example(post) ->
+    maps:merge(
+        connector_example(put),
+        #{
+            type => atom_to_binary(?CONNECTOR_TYPE),
+            name => <<"my_connector">>
+        }
+    );
+connector_example(put) ->
+    #{
+        enable => true,
+        description => <<"My connector">>,
+        pool_size => 3,
+        proto_ver => <<"v5">>,
+        server => <<"127.0.0.1:1883">>,
+        resource_opts => #{
+            health_check_interval => <<"45s">>,
+            start_after_created => true,
+            start_timeout => <<"5s">>
+        }
+    }.
 
 static_clientid_validator([]) ->
     ok;
@@ -438,3 +527,23 @@ static_clientid_validate_clientids_length(Ids) ->
         false ->
             ok
     end.
+
+mk_duration(Desc, Opts) ->
+    emqx_schema:mk_duration(Desc, Opts).
+
+mk(Type, Opts) ->
+    hoconsc:mk(Type, Opts).
+
+ref(SchemaModule, StructName) ->
+    hoconsc:ref(SchemaModule, StructName).
+
+format_duplicated_name_groups(DuplicatedNameGroups) ->
+    lists:join(
+        $;,
+        lists:map(
+            fun(NameGroup) ->
+                lists:join($,, lists:sort(NameGroup))
+            end,
+            DuplicatedNameGroups
+        )
+    ).

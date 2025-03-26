@@ -616,7 +616,8 @@ fields_mqtt_quic_listener_stream_recv_window_default.label:
 """Stream recv window default"""
 
 mqtt_mqueue_priorities.desc:
-"""Topic priority list. Prioritize messages in the message queue by topic. The priority range is `[1, 255]`.
+"""~
+Topic priority list. Prioritize messages in the message queue by topic. The priority range is `[1, 255]`.
 
 The larger the value, the higher the priority. Messages with higher priority will be sent first.
 
@@ -628,7 +629,7 @@ Note: commas and equal signs are not supported in topic names.
 
 For example, if you want `topic/1` to have a higher priority than `topic/2`, you can configure it like this:
 
-`mqueue_priorities: {\"topic/1\": 10, \"topic/2\": 8}`"""
+`mqueue_priorities: {"topic/1": 10, "topic/2": 8}`~"""
 
 mqtt_mqueue_priorities.label:
 """Topic Priorities"""
@@ -812,6 +813,12 @@ fields_mqtt_quic_listener_stateless_operation_expiration_ms.desc:
 
 fields_mqtt_quic_listener_stateless_operation_expiration_ms.label:
 """Stateless operation expiration ms"""
+
+fields_mqtt_quic_listener_sslkeylogfile.desc:
+"""Specify the path to the file on the local filesystem where the listener writes TLS session secrets for each connection, enabling decryption of the traffic. This cannot be changed at runtime."""
+
+fields_mqtt_quic_listener_sslkeylogfile.label:
+"""SSLKEYLOGFILE"""
 
 server_ssl_opts_schema_dhfile.desc:
 """Path to a file containing PEM-encoded Diffie-Hellman parameters
@@ -1516,12 +1523,13 @@ mqtt_listener_proxy_protocol.label:
 """Proxy protocol"""
 
 mqtt_listener_access_rules.desc:
-"""An access rule list consisting of string rules to restrict or allow access from some addresses. The rules that appear earlier in the list are matched first.
+"""~
+An access rule list consisting of string rules to restrict or allow access from some addresses. The rules that appear earlier in the list are matched first.
 The format is `allow | deny <address> | <CIDR> | all`.
 
 For example:
 
-`[\"deny 192.168.1.1\", \"allow 192.168.1.0/24\", \"deny, all\"]`"""
+`["deny 192.168.1.1", "allow 192.168.1.0/24", "deny all"]`~"""
 
 mqtt_listener_access_rules.label:
 """Access rules"""
@@ -1807,4 +1815,10 @@ socket_tcp_keepalive.label:
     - Review the subscriptions that clients are doing, for example, try to compact topic filters;
     - Check if intra-cluster network bandwidth is reaching a maximum.~"""
   }
+
+config_backup_interval.label:
+"""Config Backup Interval"""
+config_backup_interval.desc:
+"""Interval at which backups to `cluster.hocon` are made.  Even if multiple configuration updates are made withing this interval, only one backup will be made with the current configuration."""
+
 }

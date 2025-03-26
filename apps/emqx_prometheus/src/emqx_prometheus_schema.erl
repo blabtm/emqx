@@ -68,7 +68,9 @@ fields(recommend_setting) ->
                 required => false,
                 importance => ?IMPORTANCE_LOW,
                 desc => ?DESC(collectors)
-            })}
+            })},
+        {latency_buckets,
+            emqx_schema:latency_histogram_buckets_sc(#{desc => ?DESC(latency_buckets)})}
     ];
 fields(push_gateway) ->
     [
@@ -80,6 +82,15 @@ fields(push_gateway) ->
                     required => true,
                     %% importance => ?IMPORTANCE_NO_DOC,
                     desc => ?DESC(push_gateway_enable)
+                }
+            )},
+        {method,
+            ?HOCON(
+                hoconsc:enum([put, post]),
+                #{
+                    default => put,
+                    required => true,
+                    desc => ?DESC(push_gateway_method)
                 }
             )},
         {url,

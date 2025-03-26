@@ -15,6 +15,8 @@
 %%--------------------------------------------------------------------
 -module(emqx_bridge_v2).
 
+-feature(maybe_expr, enable).
+
 -behaviour(emqx_config_handler).
 -behaviour(emqx_config_backup).
 
@@ -86,6 +88,7 @@
 
 -export([
     parse_id/1,
+    get_resource_ids/3,
     get_channels_for_connector/1
 ]).
 
@@ -329,13 +332,8 @@ create(ConfRootKey, BridgeType, BridgeName, RawConf0) ->
         bridge_raw_config => emqx_utils:redact(RawConf0),
         root_key_path => ConfRootKey
     }),
-    RawConf =
-        emqx_utils_maps:put_if(
-            RawConf0,
-            <<"last_modified_at">>,
-            now_ms(),
-            not is_map_key(<<"last_modified_at">>, RawConf0)
-        ),
+    RawConf1 = ensure_created_at(RawConf0),
+    RawConf = ensure_last_modified_at(RawConf1),
     emqx_conf:update(
         [ConfRootKey, BridgeType, BridgeName],
         RawConf,
@@ -378,7 +376,7 @@ check_deps_and_remove(ConfRootKey, BridgeType, BridgeName, AlsoDeleteActions) ->
             false -> []
         end,
     case
-        emqx_bridge_lib:maybe_withdraw_rule_action(
+        maybe_withdraw_rule_action(
             ConfRootKey,
             BridgeType,
             BridgeName,
@@ -394,6 +392,40 @@ check_deps_and_remove(ConfRootKey, BridgeType, BridgeName, AlsoDeleteActions) ->
 %%--------------------------------------------------------------------
 %% Helpers for CRUD API
 %%--------------------------------------------------------------------
+
+maybe_withdraw_rule_action(ConfRootKey, BridgeType, BridgeName, DeleteDeps) ->
+    BridgeIds = emqx_bridge_lib:external_ids(ConfRootKey, BridgeType, BridgeName),
+    DeleteActions = lists:member(rule_actions, DeleteDeps),
+    GetFn =
+        case ConfRootKey of
+            ?ROOT_KEY_ACTIONS ->
+                fun emqx_rule_engine:get_rule_ids_by_bridge_action/1;
+            ?ROOT_KEY_SOURCES ->
+                fun emqx_rule_engine:get_rule_ids_by_bridge_source/1
+        end,
+    maybe_withdraw_rule_action_loop(BridgeIds, DeleteActions, GetFn).
+
+maybe_withdraw_rule_action_loop([], _DeleteActions, _GetFn) ->
+    ok;
+maybe_withdraw_rule_action_loop([BridgeId | More], DeleteActions, GetFn) ->
+    case GetFn(BridgeId) of
+        [] ->
+            maybe_withdraw_rule_action_loop(More, DeleteActions, GetFn);
+        RuleIds when DeleteActions ->
+            lists:foreach(
+                fun(R) ->
+                    emqx_rule_engine:ensure_action_removed(R, BridgeId)
+                end,
+                RuleIds
+            ),
+            maybe_withdraw_rule_action_loop(More, DeleteActions, GetFn);
+        RuleIds ->
+            {error, #{
+                reason => rules_depending_on_this_bridge,
+                bridge_id => BridgeId,
+                rule_ids => RuleIds
+            }}
+    end.
 
 list_with_lookup_fun(ConfRootName, LookupFun) ->
     maps:fold(
@@ -481,7 +513,7 @@ install_bridge_v2_helper(
     ConnectorId = emqx_connector_resource:resource_id(
         connector_type(BridgeV2Type), ConnectorName
     ),
-    _ = emqx_resource_manager:add_channel(
+    _ = emqx_resource_manager:add_channel_async(
         ConnectorId,
         BridgeV2Id,
         augment_channel_config(
@@ -543,14 +575,7 @@ uninstall_bridge_v2(
             ConnectorId = emqx_connector_resource:resource_id(
                 connector_type(BridgeV2Type), ConnectorName
             ),
-            Res = emqx_resource_manager:remove_channel(ConnectorId, BridgeV2Id),
-            case Res of
-                ok ->
-                    ok = emqx_resource:clear_metrics(BridgeV2Id);
-                _ ->
-                    ok
-            end,
-            Res
+            emqx_resource_manager:remove_channel_async(ConnectorId, BridgeV2Id)
     end.
 
 combine_connector_and_bridge_v2_config(
@@ -589,10 +614,12 @@ combine_connector_and_bridge_v2_config(
 disable_enable(Action, BridgeType, BridgeName) when ?ENABLE_OR_DISABLE(Action) ->
     disable_enable(?ROOT_KEY_ACTIONS, Action, BridgeType, BridgeName).
 
-disable_enable(ConfRootKey, Action, BridgeType, BridgeName) when ?ENABLE_OR_DISABLE(Action) ->
+disable_enable(ConfRootKey, EnableOrDisable, BridgeType, BridgeName) when
+    ?ENABLE_OR_DISABLE(EnableOrDisable)
+->
     emqx_conf:update(
         [ConfRootKey, BridgeType, BridgeName],
-        Action,
+        {EnableOrDisable, #{now => now_ms()}},
         #{override_to => cluster}
     ).
 
@@ -716,11 +743,15 @@ do_query_with_enabled_config(
     BridgeType, BridgeName, Message, QueryOpts0, Config
 ) ->
     ConnectorName = maps:get(connector, Config),
+    FallbackActions = maps:get(fallback_actions, Config, []),
     ConnectorType = emqx_action_info:action_type_to_connector_type(BridgeType),
     ConnectorResId = emqx_connector_resource:resource_id(ConnectorType, ConnectorName),
     QueryOpts = maps:merge(
         query_opts(BridgeType, Config),
-        QueryOpts0#{connector_resource_id => ConnectorResId}
+        QueryOpts0#{
+            connector_resource_id => ConnectorResId,
+            fallback_actions => FallbackActions
+        }
     ),
     BridgeV2Id = id(BridgeType, BridgeName),
     case Message of
@@ -1021,6 +1052,18 @@ id(BridgeType, BridgeName, ConnectorName) ->
 source_id(BridgeType, BridgeName, ConnectorName) ->
     id_with_root_name(?ROOT_KEY_SOURCES, BridgeType, BridgeName, ConnectorName).
 
+get_resource_ids(ConfRootKey, Type, Name) ->
+    try
+        maybe
+            ChannelResId = id_with_root_name(ConfRootKey, Type, Name),
+            {ok, ConnResId} ?= extract_connector_id_from_bridge_v2_id(ChannelResId),
+            {ok, {ConnResId, ChannelResId}}
+        end
+    catch
+        throw:Reason ->
+            {error, Reason}
+    end.
+
 id_with_root_name(RootName, BridgeType, BridgeName) ->
     case lookup_conf(RootName, BridgeType, BridgeName) of
         #{connector := ConnectorName} ->
@@ -1111,11 +1154,25 @@ pre_config_update([ConfRootKey, _Type, _Name], Oper, undefined) when
         (ConfRootKey =:= ?ROOT_KEY_ACTIONS orelse ConfRootKey =:= ?ROOT_KEY_SOURCES)
 ->
     {error, bridge_not_found};
+pre_config_update([ConfRootKey, _Type, _Name], {Oper, #{}}, undefined) when
+    ?ENABLE_OR_DISABLE(Oper) andalso
+        (ConfRootKey =:= ?ROOT_KEY_ACTIONS orelse ConfRootKey =:= ?ROOT_KEY_SOURCES)
+->
+    {error, bridge_not_found};
 pre_config_update([ConfRootKey, _Type, _Name], Oper, OldAction) when
     ?ENABLE_OR_DISABLE(Oper) andalso
         (ConfRootKey =:= ?ROOT_KEY_ACTIONS orelse ConfRootKey =:= ?ROOT_KEY_SOURCES)
 ->
     {ok, OldAction#{<<"enable">> => operation_to_enable(Oper)}};
+pre_config_update([ConfRootKey, _Type, _Name], {Oper, #{now := NowMS}}, OldAction) when
+    ?ENABLE_OR_DISABLE(Oper) andalso
+        (ConfRootKey =:= ?ROOT_KEY_ACTIONS orelse ConfRootKey =:= ?ROOT_KEY_SOURCES)
+->
+    Action = OldAction#{
+        <<"enable">> => operation_to_enable(Oper),
+        <<"last_modified_at">> => NowMS
+    },
+    {ok, Action};
 %% Updates a single action from a specific HTTP API.
 %% If the connector is not found, the update operation fails.
 pre_config_update([ConfRootKey, Type, Name], Conf = #{}, _OldConf) when
@@ -1143,7 +1200,7 @@ post_config_update([ConfRootKey], _Req, NewConf, OldConf, _AppEnv) when
         install_bridge_v2(ConfRootKey, Type, Name, Conf)
     end,
     UpdateFun = fun(Type, Name, {OldBridgeConf, Conf}) ->
-        uninstall_bridge_v2(ConfRootKey, Type, Name, OldBridgeConf),
+        _ = uninstall_bridge_v2(ConfRootKey, Type, Name, OldBridgeConf),
         install_bridge_v2(ConfRootKey, Type, Name, Conf)
     end,
     Result = perform_bridge_changes([
@@ -1192,18 +1249,6 @@ post_config_update([ConfRootKey, BridgeType, BridgeName], _Req, NewConf, OldConf
     case uninstall_bridge_v2(ConfRootKey, BridgeType, BridgeName, OldConf) of
         ok ->
             ok;
-        {error, timeout} ->
-            ErrorContext = #{
-                error => uninstall_timeout,
-                bridge_kind => ConfRootKey,
-                type => BridgeType,
-                name => BridgeName,
-                reason => <<
-                    "Timed out trying to remove action or source.  Please try again and,"
-                    " if the error persists, try disabling the connector before retrying."
-                >>
-            },
-            throw(ErrorContext);
         {error, not_found} ->
             %% Should not happen, unless config is inconsistent.
             throw(<<"Referenced connector not found">>)
@@ -1866,19 +1911,17 @@ bridge_v1_id_to_connector_resource_id(BridgeId) ->
     bridge_v1_id_to_connector_resource_id(?ROOT_KEY_ACTIONS, BridgeId).
 
 bridge_v1_id_to_connector_resource_id(ConfRootKey, BridgeId) ->
-    case binary:split(BridgeId, <<":">>) of
-        [Type, Name] ->
-            BridgeV2Type = bin(bridge_v1_type_to_bridge_v2_type(Type)),
-            ConnectorName =
-                case lookup_conf(ConfRootKey, BridgeV2Type, Name) of
-                    #{connector := Con} ->
-                        Con;
-                    {error, Reason} ->
-                        throw(Reason)
-                end,
-            ConnectorType = bin(connector_type(BridgeV2Type)),
-            <<"connector:", ConnectorType/binary, ":", ConnectorName/binary>>
-    end.
+    [Type, Name] = binary:split(BridgeId, <<":">>),
+    BridgeV2Type = bin(bridge_v1_type_to_bridge_v2_type(Type)),
+    ConnectorName =
+        case lookup_conf(ConfRootKey, BridgeV2Type, Name) of
+            #{connector := Con} ->
+                Con;
+            {error, Reason} ->
+                throw(Reason)
+        end,
+    ConnectorType = bin(connector_type(BridgeV2Type)),
+    <<"connector:", ConnectorType/binary, ":", ConnectorName/binary>>.
 
 bridge_v1_enable_disable(Action, BridgeType, BridgeName) ->
     case emqx_bridge_v2:bridge_v1_is_valid(BridgeType, BridgeName) of
@@ -1964,9 +2007,11 @@ bin(Atom) when is_atom(Atom) -> atom_to_binary(Atom, utf8).
 extract_connector_id_from_bridge_v2_id(Id) ->
     case binary:split(Id, <<":">>, [global]) of
         [<<"action">>, _Type, _Name, <<"connector">>, ConnectorType, ConnecorName] ->
-            <<"connector:", ConnectorType/binary, ":", ConnecorName/binary>>;
+            {ok, <<"connector:", ConnectorType/binary, ":", ConnecorName/binary>>};
+        [<<"source">>, _Type, _Name, <<"connector">>, ConnectorType, ConnecorName] ->
+            {ok, <<"connector:", ConnectorType/binary, ":", ConnecorName/binary>>};
         _X ->
-            error({error, iolist_to_binary(io_lib:format("Invalid action ID: ~p", [Id]))})
+            {error, iolist_to_binary(io_lib:format("Invalid action ID: ~p", [Id]))}
     end.
 
 ensure_atom_root_key(ConfRootKey) when is_atom(ConfRootKey) ->
@@ -2001,7 +2046,9 @@ convert_from_connectors(ConfRootKey, Conf) ->
     maps:map(
         fun(ActionType, Actions) ->
             maps:map(
-                fun(ActionName, Action) ->
+                fun(ActionName, Action0) ->
+                    Action1 = ensure_created_at(Action0),
+                    Action = ensure_last_modified_at(Action1),
                     case convert_from_connector(ConfRootKey, ActionType, ActionName, Action) of
                         {ok, NewAction} -> NewAction;
                         {error, _} -> Action
@@ -2028,6 +2075,14 @@ convert_from_connector(ConfRootKey, Type, Name, Action = #{<<"connector">> := Co
                 conf_root_key => ConfRootKey
             }}
     end.
+
+ensure_last_modified_at(RawConfig) ->
+    RawConfig#{<<"last_modified_at">> => now_ms()}.
+
+ensure_created_at(RawConfig) when is_map_key(<<"created_at">>, RawConfig) ->
+    RawConfig;
+ensure_created_at(RawConfig) ->
+    RawConfig#{<<"created_at">> => now_ms()}.
 
 get_connector_info(ConnectorNameBin, BridgeType) ->
     case to_connector(ConnectorNameBin, BridgeType) of

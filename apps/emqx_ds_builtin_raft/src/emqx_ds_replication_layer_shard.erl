@@ -12,6 +12,7 @@
 %% Static server configuration
 -export([
     shard_servers/2,
+    known_shard_servers/2,
     shard_server/3,
     local_server/2
 ]).
@@ -33,6 +34,7 @@
     add_local_server/2,
     drop_local_server/2,
     remove_server/3,
+    forget_server/3,
     server_info/2
 ]).
 
@@ -58,39 +60,88 @@
 -define(MIN_BOOSTRAP_RETRY_TIMEOUT, 50).
 -define(MAX_BOOSTRAP_RETRY_TIMEOUT, 1_000).
 
+-ifdef(TEST).
+-undef(MEMBERSHIP_CHANGE_TIMEOUT).
+-define(MEMBERSHIP_CHANGE_TIMEOUT, 2_500).
+-endif.
+
 -define(PTERM(DB, SHARD, KEY), {?MODULE, DB, SHARD, KEY}).
+
+-elvis([{elvis_style, no_catch_expressions, disable}]).
 
 %%
 
 start_link(DB, Shard, Opts) ->
     gen_server:start_link(?MODULE, {DB, Shard, Opts}, []).
 
+%% @doc Return a list of servers comprising a shard, according to the information
+%% in the DB metadata storage.
+%% Note that this indicates which servers _should_ be members of respective Ra
+%% cluster, but may at times be out-of-sync with the actual Ra cluster membership.
 -spec shard_servers(emqx_ds:db(), emqx_ds_replication_layer:shard_id()) -> [server()].
 shard_servers(DB, Shard) ->
     ReplicaSet = emqx_ds_replication_layer_meta:replica_set(DB, Shard),
-    [shard_server(DB, Shard, Site) || Site <- ReplicaSet].
+    shard_servers(DB, Shard, ReplicaSet).
 
+shard_servers(DB, Shard, [Site | Rest]) ->
+    case shard_server(DB, Shard, Site) of
+        Server when is_tuple(Server) ->
+            [Server | shard_servers(DB, Shard, Rest)];
+        undefined ->
+            shard_servers(DB, Shard, Rest)
+    end;
+shard_servers(_DB, _Shard, []) ->
+    [].
+
+%% @doc Return a list of servers comprising a shard, according to the information
+%% in the DB metadata storage, but excluding any servers residing on nodes not
+%% considered to be in the cluster.
+known_shard_servers(DB, Shard) ->
+    [Server || Server <- shard_servers(DB, Shard), is_server_known(Server)].
+
+%% @doc Return a term identifying a server for the shard located on specified site.
 -spec shard_server(
     emqx_ds:db(),
     emqx_ds_replication_layer:shard_id(),
     emqx_ds_replication_layer_meta:site()
-) -> server().
+) -> server() | undefined.
 shard_server(DB, Shard, Site) ->
-    {server_name(DB, Shard, Site), emqx_ds_replication_layer_meta:node(Site)}.
+    case emqx_ds_replication_layer_meta:node(Site) of
+        Node when Node =/= undefined ->
+            {server_name(DB, Shard, Site), Node};
+        undefined ->
+            undefined
+    end.
 
+%% @doc Return a term identifying a local server for the shard.
 -spec local_server(emqx_ds:db(), emqx_ds_replication_layer:shard_id()) -> server().
 local_server(DB, Shard) ->
     {server_name(DB, Shard, local_site()), node()}.
 
 cluster_name(DB, Shard) ->
-    iolist_to_binary(io_lib:format("~s_~s", [DB, Shard])).
+    DBBin = atom_to_binary(DB),
+    <<DBBin/binary, "_", Shard/binary>>.
 
 server_name(DB, Shard, Site) ->
+    %% NOTE
+    %% Site is redundant as part of server name, keeping for backward / rolling upgrade
+    %% compatibility.
     DBBin = atom_to_binary(DB),
     binary_to_atom(<<"ds_", DBBin/binary, Shard/binary, "_", Site/binary>>).
 
 %%
 
+%% @doc Return list of servers for the shard, taking into account runtime information
+%% about leadership and cluster connectivity.
+%% * `Order` is `leader_preferred`
+%%    Result will contain the known leader first, then rest of shard servers. If unknown,
+%%    order is unspecified. Use when request is meant to reach the leader, e.g. Ra
+%%    command.
+%% * `Order` is `local_preferred`
+%%    Return list of servers, where the local replica (if exists) is the first element.
+%%    Note: result is _NOT_ shuffled. This can be bad for the load balancing, but it
+%%    makes results more deterministic. Caller that doesn't care about that can shuffle
+%%    the results by itself.
 -spec servers(emqx_ds:db(), emqx_ds_replication_layer:shard_id(), Order) -> [server()] when
     Order :: leader_preferred | local_preferred | undefined.
 servers(DB, Shard, leader_preferred) ->
@@ -101,7 +152,6 @@ servers(DB, Shard, _Order = undefined) ->
     get_shard_servers(DB, Shard).
 
 get_servers_leader_preferred(DB, Shard) ->
-    %% NOTE: Contact last known leader first, then rest of shard servers.
     ClusterName = get_cluster_name(DB, Shard),
     case ra_leaderboard:lookup_leader(ClusterName) of
         Leader when Leader /= undefined ->
@@ -112,11 +162,6 @@ get_servers_leader_preferred(DB, Shard) ->
     end.
 
 get_servers_local_preferred(DB, Shard) ->
-    %% Return list of servers, where the local replica (if exists) is
-    %% the first element. Note: result is _NOT_ shuffled. This can be
-    %% bad for the load balancing, but it makes results more
-    %% deterministic. Caller that doesn't care about that can shuffle
-    %% the results by itself.
     ClusterName = get_cluster_name(DB, Shard),
     case ra_leaderboard:lookup_members(ClusterName) of
         undefined ->
@@ -152,6 +197,9 @@ filter_online(Servers) ->
 
 is_server_online({_Name, Node}) ->
     Node == node() orelse lists:member(Node, nodes()).
+
+is_server_known({_Name, Node}) ->
+    mria:is_node_in_cluster(Node).
 
 get_cluster_name(DB, Shard) ->
     memoize(fun cluster_name/2, [DB, Shard]).
@@ -213,13 +261,16 @@ try_servers([], _Fun, _Args) ->
 -spec add_local_server(emqx_ds:db(), emqx_ds_replication_layer:shard_id()) ->
     ok | emqx_ds:error(_Reason).
 add_local_server(DB, Shard) ->
+    ShardServers = known_shard_servers(DB, Shard),
+    add_local_server(DB, Shard, ShardServers).
+
+add_local_server(DB, Shard, ShardServers = [_ | _]) ->
     %% NOTE
     %% Adding local server as "promotable" member to the cluster, which means
     %% that it won't affect quorum until it is promoted to a voter, which in
     %% turn happens when the server has caught up sufficiently with the log.
     %% We also rely on this "membership" to understand when the server's
     %% ready.
-    ShardServers = shard_servers(DB, Shard),
     LocalServer = local_server(DB, Shard),
     case server_info(uid, LocalServer) of
         UID when is_binary(UID) ->
@@ -235,14 +286,20 @@ add_local_server(DB, Shard) ->
             }
     end,
     Timeout = ?MEMBERSHIP_CHANGE_TIMEOUT,
-    case try_servers(ShardServers, fun ra:add_member/3, [ServerRecord, Timeout]) of
+    case try_servers(ShardServers, fun ra:add_confirm_member/3, [ServerRecord, Timeout]) of
         {ok, _, _Leader} ->
             ok;
         {error, _Server, already_member} ->
             ok;
         Error ->
             {error, recoverable, Error}
-    end.
+    end;
+add_local_server(_DB, _Shard, _ShardServers = []) ->
+    %% NOTE
+    %% No active servers to ask to accept us. The most likely situation when this
+    %% happens is when all existing shard servers are owned by "lost" nodes, i.e.
+    %% those nodes that has (abnormally) left the cluster.
+    ok.
 
 %% @doc Remove a local server from the shard cluster and clean up on-disk data.
 %% It's required to have the local server running before calling this function.
@@ -267,16 +324,94 @@ drop_local_server(DB, Shard) ->
 -spec remove_server(emqx_ds:db(), emqx_ds_replication_layer:shard_id(), server()) ->
     ok | emqx_ds:error(_Reason).
 remove_server(DB, Shard, Server) ->
-    ShardServers = shard_servers(DB, Shard),
+    ShardServers = known_shard_servers(DB, Shard),
+    remove_server(Server, ShardServers).
+
+remove_server(Server, ShardServers = [_ | _]) ->
     Timeout = ?MEMBERSHIP_CHANGE_TIMEOUT,
-    case try_servers(ShardServers, fun ra:remove_member/3, [Server, Timeout]) of
+    case try_servers(ShardServers, fun ra:remove_confirm_member/3, [Server, Timeout]) of
         {ok, _, _Leader} ->
             ok;
         {error, _Server, not_member} ->
             ok;
         Error ->
             {error, recoverable, Error}
+    end;
+remove_server(_Server, _ShardServers = []) ->
+    %% NOTE
+    %% No active servers to ask to remove us.
+    ok.
+
+%% @doc Make shard cluster "forget" a remote server residing on a "lost" site.
+%% This is UNSAFE as it works directly with Ra log, and is designed to get out of
+%% situations where quorum is unlikely to ever recover.
+-spec forget_server(emqx_ds:db(), emqx_ds_replication_layer:shard_id(), server()) ->
+    ok | emqx_ds:error(_Reason).
+forget_server(DB, Shard, Server) ->
+    ShardServers = shard_servers(DB, Shard),
+    KnownShardServers = known_shard_servers(DB, Shard),
+    IsMember = lists:member(Server, ShardServers),
+    IsKnownMember = lists:member(Server, KnownShardServers),
+    IsQuorumReachable = length(KnownShardServers) * 2 > length(ShardServers),
+    case IsMember of
+        true when not IsKnownMember andalso not IsQuorumReachable ->
+            force_forget_server(Server, KnownShardServers);
+        true when IsKnownMember ->
+            {error, unrecoverable, server_known};
+        true when IsQuorumReachable ->
+            {error, unrecoverable, quorum_still_reachable};
+        false ->
+            %% Nothing to do.
+            ok
     end.
+
+force_forget_server(Server, ShardServers = [_ | _]) ->
+    %% NOTE
+    %% We need to contact all known shard servers to understand which one of them
+    %% has the most recent log entry, meaning it has the best chance to win leader
+    %% election once we make it "forget" the server. Since we're assuming that the
+    %% quorum is currently unreachable, it seems fine to just ask them for their
+    %% current status first: there should be no new log entry between this and the
+    %% subsequent log-write operation.
+    Overviews = [{S, O} || S <- ShardServers, O <- [ra_overview(S)], map_size(O) > 0],
+    UnavailableServers = ShardServers -- [S || {S, _} <- Overviews],
+    case UnavailableServers of
+        %% NOTE
+        %% Proceed only if all known servers respond. We can't risk a "down" replica
+        %% having higher log index, as it may just refuse votes later.
+        [] ->
+            %% Find the highest-term-index server among known servers.
+            {Candidate, _Overview} = lists:foldl(
+                fun(SO = {_, Overview}, SOAcc = {_, OAcc}) ->
+                    case ra_overview_termidx(Overview) > ra_overview_termidx(OAcc) of
+                        true -> SO;
+                        false -> SOAcc
+                    end
+                end,
+                hd(Overviews),
+                tl(Overviews)
+            ),
+            Timeout = ?MEMBERSHIP_CHANGE_TIMEOUT,
+            case ra_server_proc:force_forget_member(Candidate, Server, Timeout) of
+                ok ->
+                    ?tp(emqx_ds_replshard_forgot_member, #{
+                        server => Candidate,
+                        forgot => Server
+                    }),
+                    ok;
+                {error, not_member} ->
+                    ok;
+                timeout ->
+                    {error, recoverable, {timeout, Candidate}}
+            end;
+        Unavailable ->
+            {error, recoverable, {member_overview_unavailable, Unavailable}}
+    end;
+force_forget_server(_Server, []) ->
+    %% NOTE
+    %% No active servers to ask to forget it. Shouldn't end up here anyway, this
+    %% situation will likely be handled by `add_local_server/3` first.
+    ok.
 
 -spec server_info
     (readiness, server()) -> ready | {unready, _Details} | unknown;
@@ -334,6 +469,11 @@ ra_overview(Server) ->
         _Error ->
             #{}
     end.
+
+ra_overview_termidx(Overview) ->
+    Term = maps:get(current_term, Overview, 0),
+    Idx = maps:get(commit_index, Overview, -1),
+    {Term, Idx}.
 
 %%
 
@@ -438,7 +578,7 @@ bootstrap(St = #st{stage = {wait_log_index, RaftIdx}, db = DB, shard = Shard, se
 start_server(DB, Shard, #{replication_options := ReplicationOpts}) ->
     ClusterName = cluster_name(DB, Shard),
     LocalServer = local_server(DB, Shard),
-    Servers = shard_servers(DB, Shard),
+    Servers = known_shard_servers(DB, Shard),
     MutableConfig = #{tick_timeout => 100},
     case ra:restart_server(DB, LocalServer, MutableConfig) of
         {error, name_not_registered} ->

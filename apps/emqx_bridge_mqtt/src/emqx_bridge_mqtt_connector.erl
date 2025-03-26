@@ -55,10 +55,13 @@
 
 -include_lib("snabbkaffe/include/snabbkaffe.hrl").
 
+-elvis([{elvis_style, no_catch_expressions, disable}]).
+
 -define(HEALTH_CHECK_TIMEOUT, 1000).
 -define(NO_PREFIX, <<>>).
 -define(IS_NO_PREFIX(P), (P =:= undefined orelse P =:= ?NO_PREFIX)).
 -define(MAX_PREFIX_BYTES, 19).
+-define(AUTO_RECONNECT_INTERVAL_S, 2).
 
 -type clientid() :: binary().
 -type channel_resource_id() :: action_resource_id() | source_resource_id().
@@ -256,7 +259,8 @@ start_mqtt_clients(ResourceId, StartConf, ClientOpts) ->
         {name, PoolName},
         {pool_size, PoolSize},
         {available_clientids, AvailableClientids},
-        {client_opts, ClientOpts}
+        {client_opts, ClientOpts},
+        {auto_reconnect, ?AUTO_RECONNECT_INTERVAL_S}
     ],
     ok = emqx_resource:allocate_resource(ResourceId, pool_name, PoolName),
     case emqx_resource_pool:start(PoolName, ?MODULE, Options) of
@@ -405,6 +409,10 @@ handle_send_result({ok, Reply}) ->
 handle_send_result({error, Reason}) ->
     {error, classify_error(Reason)}.
 
+classify_reply(Reply = #{reason_code := ?RC_PACKET_IDENTIFIER_IN_USE}) ->
+    %% If `emqtt' client restarted, it may re-use packet ids that the remote broker still
+    %% has memory of.  We should retry.
+    {recoverable_error, Reply};
 classify_reply(Reply = #{reason_code := _}) ->
     {unrecoverable_error, Reply}.
 
@@ -417,6 +425,12 @@ classify_error({disconnected, _RC, _} = Reason) ->
 classify_error({shutdown, _} = Reason) ->
     {recoverable_error, Reason};
 classify_error(shutdown = Reason) ->
+    {recoverable_error, Reason};
+classify_error(closed = Reason) ->
+    {recoverable_error, Reason};
+classify_error(tcp_closed = Reason) ->
+    {recoverable_error, Reason};
+classify_error(einval = Reason) ->
     {recoverable_error, Reason};
 classify_error({unrecoverable_error, _Reason} = Error) ->
     Error;
@@ -494,6 +508,7 @@ mk_ingress_config(
 mk_ecpool_client_opts(
     ResourceId,
     Config = #{
+        connect_timeout := ConnectTimeoutS,
         server := Server,
         keepalive := KeepAlive,
         ssl := #{enable := EnableSsl} = Ssl
@@ -521,7 +536,7 @@ mk_ecpool_client_opts(
     mk_client_opt_password(Options#{
         hosts => [HostPort],
         clientid => clientid(Name, Config),
-        connect_timeout => 30,
+        connect_timeout => ConnectTimeoutS,
         keepalive => ms_to_s(KeepAlive),
         force_ping => true,
         ssl => EnableSsl,

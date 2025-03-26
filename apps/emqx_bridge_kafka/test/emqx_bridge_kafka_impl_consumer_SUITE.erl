@@ -701,7 +701,7 @@ create_bridge(Config, Overrides) ->
     Name = ?config(kafka_name, Config),
     KafkaConfig0 = ?config(kafka_config, Config),
     KafkaConfig = emqx_utils_maps:deep_merge(KafkaConfig0, Overrides),
-    emqx_bridge:create(Type, Name, KafkaConfig).
+    emqx_bridge_testlib:create_bridge_api(Type, Name, KafkaConfig).
 
 create_bridge_wait_for_balance(Config) ->
     setup_group_subscriber_spy(self()),
@@ -733,7 +733,7 @@ create_bridge_api(Config, Overrides) ->
     Res =
         case emqx_mgmt_api_test_util:request_api(post, Path, "", AuthHeader, Params, Opts) of
             {ok, {Status, Headers, Body0}} ->
-                {ok, {Status, Headers, emqx_utils_json:decode(Body0, [return_maps])}};
+                {ok, {Status, Headers, emqx_utils_json:decode(Body0)}};
             Error ->
                 Error
         end,
@@ -756,7 +756,7 @@ update_bridge_api(Config, Overrides) ->
     ct:pal("updating bridge (via http): ~p", [Params]),
     Res =
         case emqx_mgmt_api_test_util:request_api(put, Path, "", AuthHeader, Params, Opts) of
-            {ok, {_Status, _Headers, Body0}} -> {ok, emqx_utils_json:decode(Body0, [return_maps])};
+            {ok, {_Status, _Headers, Body0}} -> {ok, emqx_utils_json:decode(Body0)};
             Error -> Error
         end,
     ct:pal("bridge update result: ~p", [Res]),
@@ -792,7 +792,7 @@ do_wait_for_expected_published_messages(Messages, Acc, _Timeout) when map_size(M
 do_wait_for_expected_published_messages(Messages0, Acc0, Timeout) ->
     receive
         {publish, Msg0 = #{payload := Payload}} ->
-            case emqx_utils_json:safe_decode(Payload, [return_maps]) of
+            case emqx_utils_json:safe_decode(Payload) of
                 {error, _} ->
                     ct:pal("unexpected message: ~p; discarding", [Msg0]),
                     do_wait_for_expected_published_messages(Messages0, Acc0, Timeout);
@@ -945,7 +945,7 @@ create_rule_and_action_http(Config) ->
     AuthHeader = emqx_mgmt_api_test_util:auth_header_(),
     ct:pal("rule action params: ~p", [Params]),
     case emqx_mgmt_api_test_util:request_api(post, Path, "", AuthHeader, Params) of
-        {ok, Res} -> {ok, emqx_utils_json:decode(Res, [return_maps])};
+        {ok, Res} -> {ok, emqx_utils_json:decode(Res)};
         Error -> Error
     end.
 
@@ -1078,8 +1078,24 @@ cluster(TestCase, Config) ->
     ],
     NodeSpecs = emqx_cth_cluster:mk_nodespecs(
         [
-            {node_name(TestCase, 1), #{apps => AppSpecs}},
-            {node_name(TestCase, 2), #{apps => AppSpecs}}
+            {node_name(TestCase, 1), #{
+                apps => AppSpecs ++
+                    [
+                        emqx_management,
+                        emqx_mgmt_api_test_util:emqx_dashboard(
+                            "dashboard.listeners.http.bind = 28083"
+                        )
+                    ]
+            }},
+            {node_name(TestCase, 2), #{
+                apps => AppSpecs ++
+                    [
+                        emqx_management,
+                        emqx_mgmt_api_test_util:emqx_dashboard(
+                            "dashboard.listeners.http.bind = 28084"
+                        )
+                    ]
+            }}
         ],
         #{work_dir => emqx_cth_suite:work_dir(TestCase, Config)}
     ),
@@ -1229,7 +1245,7 @@ t_start_and_consume_ok(Config) ->
                     <<"offset">> := OffsetReply,
                     <<"headers">> := #{<<"hkey">> := <<"hvalue">>}
                 },
-                emqx_utils_json:decode(PayloadBin, [return_maps]),
+                emqx_utils_json:decode(PayloadBin),
                 #{
                     offset_reply => OffsetReply,
                     kafka_topic => KafkaTopic,
@@ -1342,7 +1358,7 @@ t_multiple_topic_mappings(Config) ->
             %% as configured.
             Payloads =
                 lists:sort([
-                    case emqx_utils_json:safe_decode(P, [return_maps]) of
+                    case emqx_utils_json:safe_decode(P) of
                         {ok, Decoded} -> Decoded;
                         {error, _} -> P
                     end
@@ -1485,7 +1501,7 @@ t_failed_creation_then_fixed(Config) ->
             <<"offset">> := _,
             <<"headers">> := #{<<"hkey">> := <<"hvalue">>}
         },
-        emqx_utils_json:decode(PayloadBin, [return_maps]),
+        emqx_utils_json:decode(PayloadBin),
         #{
             kafka_topic => KafkaTopic,
             payload => Payload
@@ -1670,7 +1686,7 @@ t_bridge_rule_action_source(Config) ->
                     <<"headers">> := #{<<"hkey">> := <<"hvalue">>},
                     <<"topic">> := KafkaTopic
                 },
-                emqx_utils_json:decode(RawPayload, [return_maps])
+                emqx_utils_json:decode(RawPayload)
             ),
             ?retry(
                 _Interval = 200,
@@ -2070,7 +2086,7 @@ t_begin_offset_earliest(Config) ->
             %% the consumers
             Published = receive_published(#{n => NumMessages}),
             Payloads = lists:map(
-                fun(#{payload := P}) -> emqx_utils_json:decode(P, [return_maps]) end,
+                fun(#{payload := P}) -> emqx_utils_json:decode(P) end,
                 Published
             ),
             ?assert(

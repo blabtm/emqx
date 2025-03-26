@@ -23,6 +23,7 @@
 -include_lib("emqx_utils/include/emqx_utils_api.hrl").
 -include_lib("emqx_bridge/include/emqx_bridge.hrl").
 -include_lib("emqx_bridge/include/emqx_bridge_proto.hrl").
+-include_lib("emqx_resource/include/emqx_resource.hrl").
 
 -import(hoconsc, [mk/2, array/1, enum/1]).
 -import(emqx_utils, [redact/1]).
@@ -73,7 +74,8 @@
     get_metrics_from_local_node/2,
     lookup_from_local_node_v6/3,
     get_metrics_from_local_node_v6/3,
-    summary_from_local_node_v7/1
+    summary_from_local_node_v7/1,
+    wait_for_ready_local_node_v7/3
 ]).
 
 -define(BPAPI_NAME, emqx_bridge).
@@ -83,10 +85,6 @@
         <<"Bridge lookup failed: bridge named '", (bin(BRIDGE_NAME))/binary, "' of type ",
             (bin(BRIDGE_TYPE))/binary, " does not exist.">>
     )
-).
-
--define(BRIDGE_NOT_ENABLED,
-    ?BAD_REQUEST(<<"Forbidden operation, bridge not enabled">>)
 ).
 
 -define(TRY_PARSE_ID(ID, EXPR),
@@ -179,9 +177,10 @@ summary_response_example(ConfRootKey) ->
         end,
     [
         #{
-            enabled => true,
+            enable => true,
             name => <<"my", ExName/binary>>,
             type => TypeEx,
+            created_at => 1736512728666,
             last_modified_at => 1736512728666,
             node_status => [
                 #{
@@ -729,9 +728,11 @@ fields(response_node_status) ->
     ];
 fields(response_summary) ->
     [
-        {enabled, mk(boolean(), #{})},
+        {enable, mk(boolean(), #{})},
         {name, mk(binary(), #{})},
         {type, mk(binary(), #{})},
+        {description, mk(binary(), #{})},
+        {created_at, mk(integer(), #{})},
         {last_modified_at, mk(integer(), #{})},
         {node_status, mk(array(hoconsc:ref(?MODULE, response_node_status)), #{})},
         {rules, mk(array(binary()), #{})},
@@ -971,6 +972,7 @@ handle_disable_enable(ConfRootKey, Id, Enable) ->
             emqx_bridge_v2:disable_enable(ConfRootKey, enable_func(Enable), BridgeType, BridgeName)
         of
             {ok, _} ->
+                wait_for_ready(ConfRootKey, BridgeType, BridgeName),
                 ?NO_CONTENT;
             {error, {pre_config_update, _, bridge_not_found}} ->
                 ?BRIDGE_NOT_FOUND(BridgeType, BridgeName);
@@ -1117,7 +1119,7 @@ operation_func(all, get_metrics) -> v2_get_metrics_from_all_nodes_v6.
 call_operation_if_enabled(NodeOrAll, OperFunc, [Nodes, ConfRootKey, BridgeType, BridgeName]) ->
     try is_enabled_bridge(ConfRootKey, BridgeType, BridgeName) of
         false ->
-            ?BRIDGE_NOT_ENABLED;
+            ?BAD_REQUEST(<<"Forbidden operation, connector not enabled">>);
         true ->
             call_operation(NodeOrAll, OperFunc, [Nodes, ConfRootKey, BridgeType, BridgeName])
     catch
@@ -1350,17 +1352,20 @@ summary_from_local_node_v7(ConfRootKey) ->
                 name := Name,
                 status := Status,
                 error := Error,
-                raw_config := RawConfig,
-                resource_data := ResourceData
+                raw_config := RawConfig
             } = BridgeInfo,
+            CreatedAt = maps:get(<<"created_at">>, RawConfig, undefined),
             LastModifiedAt = maps:get(<<"last_modified_at">>, RawConfig, undefined),
-            IsEnabled = emqx_utils_maps:deep_get([config, enable], ResourceData, true),
+            Description = maps:get(<<"description">>, RawConfig, <<"">>),
+            IsEnabled = maps:get(<<"enable">>, RawConfig, true),
             maps:merge(
                 #{
                     node => node(),
                     type => Type,
                     name => Name,
-                    enabled => IsEnabled,
+                    description => Description,
+                    enable => IsEnabled,
+                    created_at => CreatedAt,
                     last_modified_at => LastModifiedAt
                 },
                 format_bridge_status_and_error(#{status => Status, error => Error})
@@ -1368,6 +1373,30 @@ summary_from_local_node_v7(ConfRootKey) ->
         end,
         emqx_bridge_v2:list(ConfRootKey)
     ).
+
+wait_for_ready(ConfRootKey, Type, Name) ->
+    Nodes = nodes_supporting_bpapi_version(7),
+    CallsTimeout = 2 * 5_000,
+    RPCTimeout = CallsTimeout + 1_000,
+    _R = emqx_bridge_proto_v7:v2_wait_for_ready_v7(
+        Nodes,
+        ConfRootKey,
+        Type,
+        Name,
+        RPCTimeout
+    ),
+    ok.
+
+%% RPC Target
+wait_for_ready_local_node_v7(ConfRootKey, Type, Name) ->
+    try
+        {ok, {ConnResId, ChannelResId}} =
+            emqx_bridge_v2:get_resource_ids(ConfRootKey, Type, Name),
+        emqx_resource_manager:channel_health_check(ConnResId, ChannelResId)
+    catch
+        exit:{timeout, _} ->
+            {error, timeout}
+    end.
 
 %% resource
 format_resource(
@@ -1570,6 +1599,7 @@ create_or_update_bridge(ConfRootKey, BridgeType, BridgeName, Conf, HttpStatusCod
 do_create_or_update_bridge(ConfRootKey, BridgeType, BridgeName, Conf, HttpStatusCode) ->
     case emqx_bridge_v2:create(ConfRootKey, BridgeType, BridgeName, Conf) of
         {ok, _} ->
+            wait_for_ready(ConfRootKey, BridgeType, BridgeName),
             lookup_from_all_nodes(ConfRootKey, BridgeType, BridgeName, HttpStatusCode);
         {error, {PreOrPostConfigUpdate, _HandlerMod, Reason}} when
             PreOrPostConfigUpdate =:= pre_config_update;

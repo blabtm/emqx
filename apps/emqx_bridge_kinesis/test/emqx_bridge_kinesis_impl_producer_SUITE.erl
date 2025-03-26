@@ -237,7 +237,7 @@ create_bridge_http(Config, KinesisConfigOverrides) ->
     ct:pal("probe result: ~p", [ProbeResult]),
     Res =
         case emqx_mgmt_api_test_util:request_api(post, Path, "", AuthHeader, Params) of
-            {ok, Res0} -> {ok, emqx_utils_json:decode(Res0, [return_maps])};
+            {ok, Res0} -> {ok, emqx_utils_json:decode(Res0)};
             Error -> Error
         end,
     ct:pal("bridge creation result: ~p", [Res]),
@@ -257,7 +257,7 @@ create_bridge(Config, KinesisConfigOverrides, Removes) ->
     KinesisConfig1 = emqx_utils_maps:deep_merge(KinesisConfig0, KinesisConfigOverrides),
     KinesisConfig = emqx_utils_maps:deep_remove(Removes, KinesisConfig1),
     ct:pal("creating bridge: ~p", [KinesisConfig]),
-    Res = emqx_bridge:create(TypeBin, Name, KinesisConfig),
+    Res = emqx_bridge_testlib:create_bridge_api(TypeBin, Name, KinesisConfig),
     ct:pal("bridge creation result: ~p", [Res]),
     Res.
 
@@ -271,7 +271,7 @@ create_rule_and_action_http(Config) ->
     Path = emqx_mgmt_api_test_util:api_path(["rules"]),
     AuthHeader = emqx_mgmt_api_test_util:auth_header_(),
     case emqx_mgmt_api_test_util:request_api(post, Path, "", AuthHeader, Params) of
-        {ok, Res} -> {ok, emqx_utils_json:decode(Res, [return_maps])};
+        {ok, Res} -> {ok, emqx_utils_json:decode(Res)};
         Error -> Error
     end.
 
@@ -958,7 +958,7 @@ t_empty_payload_template(Config) ->
     Data = proplists:get_value(<<"Data">>, Record),
     ?assertMatch(
         #{<<"payload">> := <<"payload">>, <<"topic">> := ?TOPIC},
-        emqx_utils_json:decode(Data, [return_maps])
+        emqx_utils_json:decode(Data)
     ),
     ok.
 

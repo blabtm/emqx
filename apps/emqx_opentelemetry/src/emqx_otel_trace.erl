@@ -22,7 +22,9 @@
     client_subscribe/3,
     client_unsubscribe/3,
     client_authn/3,
+    client_authn_backend/3,
     client_authz/3,
+    client_authz_backend/3,
 
     broker_disconnect/3,
     broker_subscribe/3,
@@ -39,7 +41,7 @@
     msg_forward/3,
     msg_handle_forward/3,
 
-    broker_publish/2,
+    broker_publish/3,
 
     %% Start Span when `emqx_channel:handle_out/3` called.
     %% Stop when `emqx_channel:handle_outgoing/3` returned
@@ -78,10 +80,24 @@
 
 -define(TRACE_MODE_KEY, {?MODULE, trace_mode}).
 -define(TRACE_ALL_KEY, {?MODULE, trace_all}).
+-define(TRACE_FOLLOW_TRACEPARENT_KEY, {?MODULE, follow_traceparent}).
 -define(SHOULD_TRACE_ALL, persistent_term:get(?TRACE_ALL_KEY, false)).
 
+-define(with_process_fun_apply(SpanName, Attrs, ProcessFun, Args),
+    ?with_trace_mode(
+        erlang:apply(ProcessFun, Args),
+        ?with_span(
+            SpanName,
+            #{attributes => Attrs},
+            fun(_SpanCtx) ->
+                erlang:apply(ProcessFun, Args)
+            end
+        )
+    )
+).
+
 -define(with_trace_mode(LegacyModeBody, E2EModeBody),
-    case persistent_term:get(?TRACE_MODE_KEY, undefined) of
+    case persistent_term:get(?TRACE_MODE_KEY, ?TRACE_MODE_LEGACY) of
         ?TRACE_MODE_E2E -> E2EModeBody;
         ?TRACE_MODE_LEGACY -> LegacyModeBody
     end
@@ -136,12 +152,17 @@ set_trace_filter(#{
     %% local setting, no sampler
     persistent_term:put(?TRACE_MODE_KEY, ?TRACE_MODE_LEGACY),
     persistent_term:put(?TRACE_ALL_KEY, TraceAll),
+    _ = application:unset_env(opentelemetry, sampler),
     [];
 set_trace_filter(#{
     trace_mode := ?TRACE_MODE_E2E,
     e2e_tracing_options := E2EOpts
 }) ->
     persistent_term:put(?TRACE_MODE_KEY, ?TRACE_MODE_E2E),
+    persistent_term:put(
+        ?TRACE_FOLLOW_TRACEPARENT_KEY,
+        maps:get(follow_traceparent, E2EOpts, true)
+    ),
     [{sampler, {emqx_otel_sampler, E2EOpts}}].
 
 -spec stop() -> ok.
@@ -154,30 +175,26 @@ stop() ->
 %%--------------------------------------------------------------------
 
 -spec client_connect(
-    Packet,
-    Attrs,
-    fun((Packet) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Packet :: emqx_types:packet(),
-    Attrs :: attrs(),
-    Res :: term().
-client_connect(Packet, Attrs, ProcessFun) ->
+    Res :: emqx_external_trace:t_res().
+client_connect(InitAttrs, ProcessFun, [Packet] = Args) ->
     ?with_trace_mode(
-        ProcessFun(Packet),
+        erlang:apply(ProcessFun, Args),
         begin
-            RootCtx = otel_ctx:new(),
+            RootCtx = e2e_mode_root_ctx(Packet),
             SpanCtx = otel_tracer:start_span(
                 RootCtx,
                 ?current_tracer,
                 ?CLIENT_CONNECT_SPAN_NAME,
-                #{attributes => Attrs}
+                #{attributes => InitAttrs}
             ),
             Ctx = otel_tracer:set_current_span(RootCtx, SpanCtx),
             _ = otel_ctx:attach(Ctx),
             try
-                ProcessFun(Packet)
+                erlang:apply(ProcessFun, Args)
             after
                 _ = ?end_span(),
                 clear()
@@ -186,30 +203,26 @@ client_connect(Packet, Attrs, ProcessFun) ->
     ).
 
 -spec client_disconnect(
-    Packet,
-    Attrs,
-    fun((Packet) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Packet :: emqx_types:packet(),
-    Attrs :: attrs(),
-    Res :: term().
-client_disconnect(Packet, Attrs, ProcessFun) ->
+    Res :: emqx_external_trace:t_res().
+client_disconnect(InitAttrs, ProcessFun, [Packet] = Args) ->
     ?with_trace_mode(
-        ProcessFun(Packet),
+        erlang:apply(ProcessFun, Args),
         begin
-            RootCtx = otel_ctx:new(),
+            RootCtx = e2e_mode_root_ctx(Packet),
             SpanCtx = otel_tracer:start_span(
                 RootCtx,
                 ?current_tracer,
                 ?CLIENT_DISCONNECT_SPAN_NAME,
-                #{attributes => Attrs}
+                #{attributes => InitAttrs}
             ),
             Ctx = otel_tracer:set_current_span(RootCtx, SpanCtx),
             _ = otel_ctx:attach(Ctx),
             try
-                ProcessFun(Packet)
+                erlang:apply(ProcessFun, Args)
             after
                 _ = ?end_span(),
                 clear()
@@ -218,30 +231,26 @@ client_disconnect(Packet, Attrs, ProcessFun) ->
     ).
 
 -spec client_subscribe(
-    Packet,
-    Attrs,
-    fun((Packet) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Packet :: emqx_types:packet(),
-    Attrs :: attrs(),
-    Res :: term().
-client_subscribe(Packet, Attrs, ProcessFun) ->
+    Res :: emqx_external_trace:t_res().
+client_subscribe(InitAttrs, ProcessFun, [Packet] = Args) ->
     ?with_trace_mode(
-        ProcessFun(Packet),
+        erlang:apply(ProcessFun, Args),
         begin
-            RootCtx = otel_ctx:new(),
+            RootCtx = e2e_mode_root_ctx(Packet),
             SpanCtx = otel_tracer:start_span(
                 RootCtx,
                 ?current_tracer,
                 ?CLIENT_SUBSCRIBE_SPAN_NAME,
-                #{attributes => Attrs}
+                #{attributes => InitAttrs}
             ),
             Ctx = otel_tracer:set_current_span(RootCtx, SpanCtx),
             _ = otel_ctx:attach(Ctx),
             try
-                ProcessFun(Packet)
+                erlang:apply(ProcessFun, Args)
             after
                 _ = ?end_span(),
                 clear()
@@ -250,30 +259,26 @@ client_subscribe(Packet, Attrs, ProcessFun) ->
     ).
 
 -spec client_unsubscribe(
-    Packet,
-    Attrs,
-    fun((Packet) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Packet :: emqx_types:packet(),
-    Attrs :: attrs(),
-    Res :: term().
-client_unsubscribe(Packet, Attrs, ProcessFun) ->
+    Res :: emqx_external_trace:t_res().
+client_unsubscribe(InitAttrs, ProcessFun, [Packet] = Args) ->
     ?with_trace_mode(
-        ProcessFun(Packet),
+        erlang:apply(ProcessFun, Args),
         begin
-            RootCtx = otel_ctx:new(),
+            RootCtx = e2e_mode_root_ctx(Packet),
             SpanCtx = otel_tracer:start_span(
                 RootCtx,
                 ?current_tracer,
                 ?CLIENT_UNSUBSCRIBE_SPAN_NAME,
-                #{attributes => Attrs}
+                #{attributes => InitAttrs}
             ),
             Ctx = otel_tracer:set_current_span(RootCtx, SpanCtx),
             _ = otel_ctx:attach(Ctx),
             try
-                ProcessFun(Packet)
+                erlang:apply(ProcessFun, Args)
             after
                 _ = ?end_span(),
                 clear()
@@ -282,142 +287,89 @@ client_unsubscribe(Packet, Attrs, ProcessFun) ->
     ).
 
 -spec client_authn(
-    Packet,
-    Attrs,
-    fun((Packet) -> Res)
+    Attrs :: emqx_external_trace:attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
+) ->
+    Res :: emqx_external_trace:t_res().
+client_authn(Attrs, ProcessFun, Args) ->
+    ?with_process_fun_apply(?CLIENT_AUTHN_SPAN_NAME, Attrs, ProcessFun, Args).
+
+-spec client_authn_backend(
+    Attrs :: emqx_external_trace:attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
     Res
 when
-    Packet :: emqx_types:packet(),
-    Attrs :: attrs(),
-    Res :: term().
-client_authn(Packet, Attrs, ProcessFun) ->
-    ?with_trace_mode(
-        ProcessFun(Packet),
-        ?with_span(
-            ?CLIENT_AUTHN_SPAN_NAME,
-            #{attributes => Attrs},
-            fun(_SpanCtx) ->
-                ProcessFun(Packet)
-            end
-        )
-    ).
+    Res :: emqx_external_trace:t_res().
+client_authn_backend(Attrs, ProcessFun, Args) ->
+    ?with_process_fun_apply(?CLIENT_AUTHN_BACKEND_SPAN_NAME, Attrs, ProcessFun, Args).
 
 -spec client_authz(
-    Packet,
-    Attrs,
-    fun((Packet) -> Res)
+    Attrs :: emqx_external_trace:attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Packet :: emqx_types:packet(),
-    Attrs :: attrs(),
-    Res :: term().
-client_authz(Packet, Attrs, ProcessFun) ->
-    ?with_trace_mode(
-        ProcessFun(Packet),
-        ?with_span(
-            ?CLIENT_AUTHZ_SPAN_NAME,
-            #{attributes => Attrs},
-            fun(_SpanCtx) ->
-                ProcessFun(Packet)
-            %% TODO: add more attributes about: which authorizer resulted:
-            %% allow|deny|cache_hit|cache_miss
-            %% case ProcessFun(Packet) of
-            %%     xx -> xx,
-            end
-        )
-    ).
+    Res :: emqx_external_trace:t_res().
+client_authz(Attrs, ProcessFun, Args) ->
+    ?with_process_fun_apply(?CLIENT_AUTHZ_SPAN_NAME, Attrs, ProcessFun, Args).
+
+-spec client_authz_backend(
+    Attrs :: emqx_external_trace:attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
+) ->
+    Res :: emqx_external_trace:t_res().
+client_authz_backend(Attrs, ProcessFun, Args) ->
+    ?with_process_fun_apply(?CLIENT_AUTHZ_BACKEND_SPAN_NAME, Attrs, ProcessFun, Args).
 
 -spec broker_disconnect(
-    Any,
-    Attrs,
-    fun((Any) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Any :: term(),
-    Attrs :: attrs(),
-    Res :: term().
-broker_disconnect(Any, Attrs, ProcessFun) ->
-    ?with_trace_mode(
-        ProcessFun(Any),
-        ?with_span(
-            ?BROKER_DISCONNECT_SPAN_NAME,
-            #{attributes => Attrs},
-            fun(_SpanCtx) ->
-                ProcessFun(Any)
-            end
-        )
-    ).
+    Res :: emqx_external_trace:t_res().
+broker_disconnect(InitAttrs, ProcessFun, Args) ->
+    ?with_process_fun_apply(?BROKER_DISCONNECT_SPAN_NAME, InitAttrs, ProcessFun, Args).
 
 -spec broker_subscribe(
-    Any,
-    Attrs,
-    fun((Any) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Any :: term(),
-    Attrs :: attrs(),
-    Res :: term().
-broker_subscribe(Any, Attrs, ProcessFun) ->
-    ?with_trace_mode(
-        ProcessFun(Any),
-        ?with_span(
-            ?BROKER_SUBSCRIBE_SPAN_NAME,
-            #{attributes => Attrs},
-            fun(_SpanCtx) ->
-                ProcessFun(Any)
-            end
-        )
-    ).
+    Res :: emqx_external_trace:t_res().
+broker_subscribe(InitAttrs, ProcessFun, Args) ->
+    ?with_process_fun_apply(?BROKER_SUBSCRIBE_SPAN_NAME, InitAttrs, ProcessFun, Args).
 
 -spec broker_unsubscribe(
-    Any,
-    Attrs,
-    fun((Any) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Any :: term(),
-    Attrs :: attrs(),
-    Res :: term().
-broker_unsubscribe(Any, Attrs, ProcessFun) ->
-    ?with_trace_mode(
-        ProcessFun(Any),
-        ?with_span(
-            ?BROKER_UNSUBSCRIBE_SPAN_NAME,
-            #{attributes => Attrs},
-            fun(_SpanCtx) ->
-                ProcessFun(Any)
-            end
-        )
-    ).
+    Res :: emqx_external_trace:t_res().
+broker_unsubscribe(InitAttrs, ProcessFun, Args) ->
+    ?with_process_fun_apply(?BROKER_UNSUBSCRIBE_SPAN_NAME, InitAttrs, ProcessFun, Args).
 
 -spec client_publish(
-    Packet,
-    Attrs,
-    fun((Packet) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Packet :: emqx_types:packet(),
-    Attrs :: attrs(),
-    Res :: term().
-client_publish(Packet, Attrs, ProcessFun) ->
+    Res :: emqx_external_trace:t_res().
+client_publish(InitAttrs, ProcessFun, [Packet] = Args) ->
     ?with_trace_mode(
         trace_process_publish(
-            Packet, #{clientid => maps:get('client.clientid', Attrs)}, ProcessFun
+            Packet, #{clientid => maps:get('client.clientid', InitAttrs)}, ProcessFun
         ),
         begin
             %% XXX: should trace for durable sessions?
-            RootCtx = otel_ctx:new(),
+            RootCtx = e2e_mode_root_ctx(Packet),
             SpanCtx = otel_tracer:start_span(
                 RootCtx,
                 ?current_tracer,
                 ?CLIENT_PUBLISH_SPAN_NAME,
-                #{attributes => Attrs}
+                #{attributes => InitAttrs}
             ),
             Ctx = otel_tracer:set_current_span(RootCtx, SpanCtx),
             %% Otel attach for next spans (client_authz, msg_route... etc )
@@ -429,7 +381,7 @@ client_publish(Packet, Attrs, ProcessFun) ->
             attach_outgoing(Packet, Ctx),
 
             try
-                ProcessFun(Packet)
+                erlang:apply(ProcessFun, Args)
             after
                 _ = ?end_span(),
                 erase_outgoing(Packet),
@@ -464,134 +416,109 @@ erase_outgoing(?PUBLISH_PACKET(?QOS_2, PacketId)) ->
     ok.
 
 -spec client_puback(
-    Packet,
-    Attrs,
-    fun((Packet) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Packet :: emqx_types:packet(),
-    Attrs :: attrs(),
-    Res :: term().
-client_puback(Packet, Attrs, ProcessFun) ->
-    client_incoming(Packet, Attrs, ProcessFun).
+    Res :: emqx_external_trace:t_res().
+client_puback(InitAttrs, ProcessFun, Args) ->
+    client_incoming(InitAttrs, ProcessFun, Args).
 
 -spec client_pubrec(
-    Packet,
-    Attrs,
-    fun((Packet) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Packet :: emqx_types:packet(),
-    Attrs :: attrs(),
-    Res :: term().
-client_pubrec(Packet, Attrs, ProcessFun) ->
-    client_incoming(Packet, Attrs, ProcessFun).
+    Res :: emqx_external_trace:t_res().
+client_pubrec(InitAttrs, ProcessFun, Args) ->
+    client_incoming(InitAttrs, ProcessFun, Args).
 
 -spec client_pubrel(
-    Packet,
-    Attrs,
-    fun((Packet) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Packet :: emqx_types:packet(),
-    Attrs :: attrs(),
-    Res :: term().
-client_pubrel(Packet, Attrs, ProcessFun) ->
-    client_incoming(Packet, Attrs, ProcessFun).
+    Res :: emqx_external_trace:t_res().
+client_pubrel(InitAttrs, ProcessFun, Args) ->
+    client_incoming(InitAttrs, ProcessFun, Args).
 
 -spec client_pubcomp(
-    Packet,
-    Attrs,
-    fun((Packet) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Packet :: emqx_types:packet(),
-    Attrs :: attrs(),
-    Res :: term().
-client_pubcomp(Packet, Attrs, ProcessFun) ->
-    client_incoming(Packet, Attrs, ProcessFun).
+    Res :: emqx_external_trace:t_res().
+client_pubcomp(InitAttrs, ProcessFun, Args) ->
+    client_incoming(InitAttrs, ProcessFun, Args).
 
 -spec msg_route(
-    Delivery,
-    Attrs,
-    fun((Delivery) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Delivery :: emqx_types:delivery(),
-    Attrs :: attrs(),
-    Res :: emqx_types:publish_result().
-msg_route(Delivery, Attrs, Fun) ->
+    Res :: emqx_external_trace:t_res().
+msg_route(InitAttrs, ProcessFun, [Delivery] = Args) ->
     ?with_trace_mode(
-        Fun(Delivery),
+        erlang:apply(ProcessFun, Args),
         case ignore_delivery(Delivery) of
             true ->
-                Fun(Delivery);
+                erlang:apply(ProcessFun, Args);
             false ->
                 ?with_span(
                     ?MSG_ROUTE_SPAN_NAME,
-                    #{attributes => Attrs},
+                    #{attributes => InitAttrs},
                     fun(_SpanCtx) ->
-                        Fun(put_ctx(otel_ctx:get_current(), Delivery))
+                        NArgs = [put_ctx(otel_ctx:get_current(), Delivery)],
+                        erlang:apply(ProcessFun, NArgs)
                     end
                 )
         end
     ).
 
 -spec msg_forward(
-    Delivery,
-    Attrs,
-    fun((_) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Delivery :: emqx_types:delivery(),
-    Attrs :: attrs(),
-    Res :: term().
-msg_forward(Delivery, Attrs, Fun) ->
+    Res :: emqx_external_trace:t_res().
+msg_forward(InitAttrs, ProcessFun, [Delivery] = Args) ->
     ?with_trace_mode(
-        Fun(Delivery),
+        erlang:apply(ProcessFun, Args),
         case ignore_delivery(Delivery) of
             true ->
-                Fun(Delivery);
+                erlang:apply(ProcessFun, Args);
             false ->
                 ?with_span(
                     ?MSG_FORWARD_SPAN_NAME,
-                    #{attributes => Attrs},
+                    #{attributes => InitAttrs},
                     fun(_SpanCtx) ->
-                        Fun(put_ctx(otel_ctx:get_current(), Delivery))
+                        NArgs = [put_ctx(otel_ctx:get_current(), Delivery)],
+                        erlang:apply(ProcessFun, NArgs)
                     end
                 )
         end
     ).
 
 -spec msg_handle_forward(
-    Delivery,
-    Attrs,
-    fun((_) -> Res)
+    InitAttrs :: emqx_external_trace:init_attrs(),
+    ProcessFun :: emqx_external_trace:t_fun(),
+    Args :: emqx_external_trace:t_args()
 ) ->
-    Res
-when
-    Delivery :: emqx_types:delivery(),
-    Attrs :: attrs(),
-    Res :: term().
-msg_handle_forward(Delivery, Attrs, Fun) ->
+    Res :: emqx_external_trace:t_res().
+msg_handle_forward(InitAttrs, ProcessFun, [Delivery] = Args) ->
     ?with_trace_mode(
-        Fun(Delivery),
+        erlang:apply(ProcessFun, Args),
         case ignore_delivery(Delivery) of
             true ->
-                Fun(Delivery);
+                erlang:apply(ProcessFun, Args);
             false ->
                 _ = otel_ctx:attach(get_ctx(Delivery)),
                 ?with_span(
                     ?MSG_HANDLE_FORWARD_SPAN_NAME,
-                    #{attributes => Attrs},
+                    #{attributes => InitAttrs},
                     fun(_SpanCtx) ->
-                        Fun(put_ctx(otel_ctx:get_current(), Delivery))
+                        NArgs = [put_ctx(otel_ctx:get_current(), Delivery)],
+                        erlang:apply(ProcessFun, NArgs)
                     end
                 )
         end
@@ -601,15 +528,13 @@ msg_handle_forward(Delivery, Attrs, Fun) ->
 %% Span starts in Delivers(Msg) and stops when outgoing(Packets)
 %% Only for `PUBLISH(Qos=0|1|2)`
 -spec broker_publish(
-    list(Deliver),
-    Attrs
-) ->
+    emqx_external_trace:attrs(),
+    TraceAction :: ?EXT_TRACE_START,
     %% Delivers with Ctx Attached
     list(Deliver)
-when
-    Deliver :: emqx_types:deliver(),
-    Attrs :: attrs().
-broker_publish(Delivers, Attrs) ->
+) -> list(Deliver) when
+    Deliver :: emqx_types:deliver().
+broker_publish(Attrs, ?EXT_TRACE_START, Delivers) ->
     ?with_trace_mode(
         start_trace_send(Delivers, #{clientid => maps:get('client.clientid', Attrs)}),
         lists:map(
@@ -632,27 +557,22 @@ broker_publish(Delivers, Attrs) ->
     ).
 
 -spec outgoing(
-    TraceAction,
-    Packet,
-    Attrs
-) ->
-    Res
-when
+    Attrs :: emqx_external_trace:attrs(),
     TraceAction :: ?EXT_TRACE_START | ?EXT_TRACE_STOP,
-    Packet :: emqx_types:packet(),
-    Attrs :: attrs(),
-    Res :: term().
-outgoing(?EXT_TRACE_START, Packet, Attrs) ->
+    Packet :: emqx_types:packet()
+) ->
+    Res :: emqx_external_trace:t_res().
+outgoing(Attrs, ?EXT_TRACE_START, Packet) ->
     %% Note: the function case only for
     %% `PUBACK`, `PUBREC`, `PUBREL`, `PUBCOMP`
     ?with_trace_mode(
         Packet,
-        start_outgoing_trace(Packet, Attrs)
+        start_outgoing_trace(Attrs, Packet)
     );
-outgoing(?EXT_TRACE_STOP, Any, Attrs) ->
+outgoing(Attrs, ?EXT_TRACE_STOP, Any) ->
     ?with_trace_mode(
         end_trace_send(Any),
-        stop_outgoing_trace(Any, Attrs)
+        stop_outgoing_trace(Attrs, Any)
     ).
 
 %%--------------------------------------------------------------------
@@ -664,7 +584,7 @@ outgoing(?EXT_TRACE_STOP, Any, Attrs) ->
     ChannelInfo :: emqx_external_trace:channel_info(),
     Res :: term().
 trace_process_publish(Packet, ChannelInfo, ProcessFun) ->
-    case maybe_init_ctx(Packet) of
+    case legacy_mode_root_ctx(Packet) of
         false ->
             ProcessFun(Packet);
         RootCtx ->
@@ -729,25 +649,25 @@ end_trace_send(Packets) ->
 
 %% ====================
 %% Broker -> Client(`Publisher'):
-start_outgoing_trace(?PUBACK_PACKET(PacketId) = Packet, Attrs) ->
-    start_outgoing_trace(Packet, Attrs, detach_internal_ctx({?PUBACK, PacketId}));
-start_outgoing_trace(?PUBREC_PACKET(PacketId) = Packet, Attrs) ->
-    start_outgoing_trace(Packet, Attrs, detach_internal_ctx({?PUBREC, PacketId}));
-start_outgoing_trace(?PUBCOMP_PACKET(PacketId) = Packet, Attrs) ->
-    start_outgoing_trace(Packet, Attrs, detach_internal_ctx({?PUBREL, PacketId}));
+start_outgoing_trace(Attrs, ?PUBACK_PACKET(PacketId) = Packet) ->
+    start_outgoing_trace(Attrs, Packet, detach_internal_ctx({?PUBACK, PacketId}));
+start_outgoing_trace(Attrs, ?PUBREC_PACKET(PacketId) = Packet) ->
+    start_outgoing_trace(Attrs, Packet, detach_internal_ctx({?PUBREC, PacketId}));
+start_outgoing_trace(Attrs, ?PUBCOMP_PACKET(PacketId) = Packet) ->
+    start_outgoing_trace(Attrs, Packet, detach_internal_ctx({?PUBREL, PacketId}));
 %% ====================
 %% Broker -> Client(`Subscriber'):
-start_outgoing_trace(?PUBREL_PACKET(PacketId) = Packet, Attrs) ->
+start_outgoing_trace(Attrs, ?PUBREL_PACKET(PacketId) = Packet) ->
     %% Previous awaiting was PUBREC
     %% the awaiting PUBREL Span's parent is outgoing PUBREC Span
-    start_outgoing_trace(Packet, Attrs, detach_internal_ctx({?PUBREC, PacketId}));
+    start_outgoing_trace(Attrs, Packet, detach_internal_ctx({?PUBREC, PacketId}));
 %% The Incoming span is still being recorded and Ctx has not been erased
 %% when the following outgoing spans starting.
 %% `SUBACK' / `UNSUBACK' / `PUBACK'
-start_outgoing_trace(Packet, Attrs) ->
-    start_outgoing_trace(Packet, Attrs, otel_ctx:get_current()).
+start_outgoing_trace(Attrs, Packet) ->
+    start_outgoing_trace(Attrs, Packet, otel_ctx:get_current()).
 
-start_outgoing_trace(Packet, Attrs, ParentCtx) ->
+start_outgoing_trace(Attrs, Packet, ParentCtx) ->
     SpanCtx = otel_tracer:start_span(
         ParentCtx,
         ?current_tracer,
@@ -759,16 +679,16 @@ start_outgoing_trace(Packet, Attrs, ParentCtx) ->
 
 %% Ctx attached in Delivers in `broker_publish/2` and
 %% transformed to Packet when outgoing
-stop_outgoing_trace(Anys, Attrs) when is_list(Anys) ->
-    lists:foreach(fun(Any) -> stop_outgoing_trace(Any, Attrs) end, Anys);
-stop_outgoing_trace(Packet, Attrs) when is_record(Packet, mqtt_packet) ->
+stop_outgoing_trace(Attrs, Anys) when is_list(Anys) ->
+    lists:foreach(fun(Any) -> stop_outgoing_trace(Attrs, Any) end, Anys);
+stop_outgoing_trace(Attrs, Packet) when is_record(Packet, mqtt_packet) ->
     %% Maybe awaiting for next Packet
     %% The current outgoing Packet SHOULD NOT be modified
     ok = outgoing_maybe_awaiting_next(Packet, Attrs),
     Ctx = get_ctx(Packet),
     ok = maybe_override_message_qos(Packet, Ctx),
     end_span(Ctx);
-stop_outgoing_trace(Any, _Attrs) ->
+stop_outgoing_trace(_Attrs, Any) ->
     end_span(get_ctx(Any)).
 
 -compile({inline, [end_span/1]}).
@@ -834,11 +754,11 @@ start_awaiting_trace(AwaitingType, PacketId, Packet, Attrs) ->
     _ = attach_internal_ctx(AwaitingCtxKey, NCtx),
     ok.
 
-client_incoming(?PACKET(AwaitingType, PktVar) = Packet, Attrs, ProcessFun) ->
+client_incoming(Attrs, ProcessFun, [?PACKET(AwaitingType, PktVar)] = Args) ->
     ?with_trace_mode(
-        ProcessFun(Packet),
+        erlang:apply(ProcessFun, Args),
         try
-            ProcessFun(Packet)
+            erlang:apply(ProcessFun, Args)
         after
             end_awaiting_client_packet(
                 internal_extra_key(AwaitingType, PktVar), Attrs
@@ -935,7 +855,7 @@ awaiting_span_name(?PUBCOMP) ->
 %%--------------------------------------------------------------------
 
 -spec add_span_attrs(AttrsOrMeta) -> ok when
-    AttrsOrMeta :: attrs().
+    AttrsOrMeta :: emqx_external_trace:attrs().
 add_span_attrs(EmpytAttr) when map_size(EmpytAttr) =:= 0 ->
     ok;
 add_span_attrs(Attrs) ->
@@ -979,17 +899,27 @@ set_status_error(Msg) ->
 msg_attrs(_Msg = #message{flags = #{sys := true}}) ->
     #{};
 msg_attrs(Msg = #message{}) ->
-    #{
+    Attrs = #{
         'message.msgid' => emqx_guid:to_hexstr(Msg#message.id),
         'message.qos' => Msg#message.qos,
         'message.from' => Msg#message.from,
         'message.topic' => Msg#message.topic,
         'message.retain' => maps:get(retain, Msg#message.flags, false),
-        'message.pub_props' => emqx_utils_json:encode(
-            maps:get(properties, Msg#message.headers, #{})
-        ),
         'message.payload_size' => size(Msg#message.payload)
-    }.
+    },
+    msg_attr_props(Msg, Attrs).
+
+msg_attr_props(#message{headers = #{properties := Props0 = #{'User-Property' := _}}}, Acc) ->
+    Props = maps:update_with('User-Property', fun maps:from_list/1, Props0),
+    Acc#{
+        'message.pub_props' => emqx_utils_json:encode(Props)
+    };
+msg_attr_props(#message{headers = #{properties := Props = #{}}}, Acc) ->
+    Acc#{
+        'message.pub_props' => emqx_utils_json:encode(Props)
+    };
+msg_attr_props(_Msg, Acc) ->
+    Acc.
 
 %%--------------------------------------------------------------------
 %% Internal functions
@@ -1082,18 +1012,26 @@ packets_list(Packets) when is_list(Packets) ->
 packets_list(Packet) ->
     [Packet].
 
-maybe_init_ctx(#mqtt_packet{variable = Packet}) ->
-    case should_trace_packet(Packet) of
+legacy_mode_root_ctx(#mqtt_packet{variable = PktVar}) ->
+    case should_trace_packet(PktVar) of
         true ->
-            Ctx = extract_traceparent_from_packet(Packet),
+            Ctx = extract_traceparent_from_packet(PktVar),
             should_trace_context(Ctx) andalso Ctx;
         false ->
             false
     end.
 
-extract_traceparent_from_packet(Packet) ->
+e2e_mode_root_ctx(#mqtt_packet{variable = PktVar}) ->
+    case persistent_term:get(?TRACE_FOLLOW_TRACEPARENT_KEY, true) of
+        true ->
+            extract_traceparent_from_packet(PktVar);
+        false ->
+            otel_ctx:new()
+    end.
+
+extract_traceparent_from_packet(PktVar) ->
     Ctx = otel_ctx:new(),
-    case emqx_packet:info(properties, Packet) of
+    case emqx_packet:info(properties, PktVar) of
         #{?USER_PROPERTY := UserProps} ->
             otel_propagator_text_map:extract_to(Ctx, UserProps);
         _ ->

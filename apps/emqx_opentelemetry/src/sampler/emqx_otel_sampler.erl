@@ -165,7 +165,6 @@ setup(#{sample_ratio := Ratio} = InitOpts) ->
 description(_Opts) ->
     <<"AttributeSampler">>.
 
-%% TODO: remote sampled
 should_sample(
     Ctx,
     TraceId,
@@ -185,8 +184,33 @@ should_sample(
         SpanName =:= ?BROKER_UNSUBSCRIBE_SPAN_NAME
 ->
     Desicion =
-        %% whitelist first
-        decide_by_match_rule(Attributes, Opts) orelse
+        %% 1st: is remote span and sampled by remote?
+        remote_sampled(otel_tracer:current_span_ctx(Ctx)) orelse
+            %% 2nd: whitelist
+            decide_by_match_rule(Attributes, Opts) orelse
+            %% 3rd: decide by traceid ratio
+            decide_by_traceid_ratio(TraceId, SpanName, Opts),
+    {
+        decide(Desicion),
+        with_cluster_id(Opts),
+        otel_span:tracestate(otel_tracer:current_span_ctx(Ctx))
+    };
+%% Msg deliver to Subscriber
+%% The publisher is not in the whitelist, but the subscriber is, sampling is still required
+should_sample(
+    Ctx,
+    TraceId,
+    _Links,
+    ?BROKER_PUBLISH_SPAN_NAME = SpanName,
+    _SpanKind,
+    Attributes,
+    Opts
+) ->
+    Desicion =
+        %% sampled by parent span
+        parent_sampled(otel_tracer:current_span_ctx(Ctx)) orelse
+            %% matched whitelist rule
+            decide_by_match_rule(Attributes, Opts) orelse
             %% then decide by traceid ratio
             decide_by_traceid_ratio(TraceId, SpanName, Opts),
     {
@@ -252,7 +276,10 @@ event_enabled(SpanName, #{client_subscribe_unsubscribe := Boolean}) when
         SpanName =:= ?BROKER_UNSUBSCRIBE_SPAN_NAME
 ->
     Boolean;
-event_enabled(?CLIENT_PUBLISH_SPAN_NAME, #{client_messaging := Boolean}) ->
+event_enabled(SpanName, #{client_messaging := Boolean}) when
+    SpanName =:= ?CLIENT_PUBLISH_SPAN_NAME orelse
+        SpanName =:= ?BROKER_PUBLISH_SPAN_NAME
+->
     Boolean.
 
 do_decide_by_traceid_ratio(_, false, _) ->
@@ -303,7 +330,15 @@ read_should_sample(Key) ->
 match_topic_filter(AttrTopic, #?EMQX_OTEL_SAMPLER{type = {?EMQX_OTEL_SAMPLE_TOPIC, Topic}}) ->
     emqx_topic:match(AttrTopic, Topic).
 
--compile({inline, [parent_sampled/1]}).
+-compile({inline, [remote_sampled/1, parent_sampled/1]}).
+
+remote_sampled(#span_ctx{is_remote = true, trace_flags = TraceFlags}) when
+    ?IS_SAMPLED(TraceFlags)
+->
+    true;
+remote_sampled(_) ->
+    false.
+
 parent_sampled(#span_ctx{trace_flags = TraceFlags}) when
     ?IS_SAMPLED(TraceFlags)
 ->

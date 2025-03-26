@@ -28,7 +28,7 @@
 
 -include("emqx_persistent_message.hrl").
 
--define(EMQX_CONFIG, "sys_topics.sys_heartbeat_interval = 1s\n").
+-define(DURABLE_SESSION_STATE, emqx_persistent_session).
 
 %%--------------------------------------------------------------------
 %% SUITE boilerplate
@@ -42,6 +42,12 @@ all() ->
         {group, persistence_disabled},
         {group, persistence_enabled}
     ].
+
+init_per_suite(Config) ->
+    Config.
+
+end_per_suite(_Config) ->
+    ok.
 
 %% A persistent session can be resumed in two ways:
 %%    1. The old connection process is still alive, and the session is taken
@@ -73,68 +79,87 @@ groups() ->
     ].
 
 init_per_group(persistence_disabled, Config) ->
+    DurableSessionsOpts = #{<<"enable">> => false},
+    EMQXOpts = #{
+        <<"sys_topics">> => #{
+            <<"sys_heartbeat_interval">> => <<"1s">>
+        }
+    },
+    Opts = #{
+        durable_sessions_opts => DurableSessionsOpts,
+        emqx_opts => EMQXOpts,
+        start_emqx_conf => false,
+        wait_fdb_init => false
+    },
     [
-        {emqx_config, ?EMQX_CONFIG ++ "durable_sessions { enable = false }"},
+        {cth_opts, Opts},
         {persistence, false}
         | Config
     ];
 init_per_group(persistence_enabled, Config) ->
+    DurableSessionsOpts = #{
+        <<"enable">> => true,
+        <<"heartbeat_interval">> => <<"100ms">>,
+        <<"renew_streams_interval">> => <<"100ms">>,
+        <<"session_gc_interval">> => <<"2s">>
+    },
+    EMQXOpts = #{
+        <<"sys_topics">> => #{
+            <<"sys_heartbeat_interval">> => <<"1s">>
+        },
+        <<"durable_storage">> => #{
+            <<"messages">> => #{<<"backend">> => <<"builtin_local">>}
+        }
+    },
+    Opts = #{
+        durable_sessions_opts => DurableSessionsOpts,
+        emqx_opts => EMQXOpts,
+        start_emqx_conf => false,
+        wait_fdb_init => [?DURABLE_SESSION_STATE]
+    },
     [
-        {emqx_config,
-            ?EMQX_CONFIG ++
-                "durable_sessions {\n"
-                "  enable = true\n"
-                "  heartbeat_interval = 100ms\n"
-                "  renew_streams_interval = 100ms\n"
-                "  session_gc_interval = 2s\n"
-                "}\n"
-                "durable_storage.messages.backend = builtin_local"},
+        {cth_opts, Opts},
         {persistence, ds}
         | Config
     ];
-init_per_group(tcp, Config) ->
-    Apps = emqx_cth_suite:start(
-        [{emqx, ?config(emqx_config, Config)}],
-        #{work_dir => emqx_cth_suite:work_dir(Config)}
-    ),
+init_per_group(tcp, Config0) ->
+    CTHOpts = ?config(cth_opts, Config0),
+    Config = emqx_common_test_helpers:start_apps_ds(Config0, _ExtraApps = [], CTHOpts),
     [
         {port, get_listener_port(tcp, default)},
-        {conn_fun, connect},
-        {group_apps, Apps}
+        {conn_fun, connect}
         | Config
     ];
-init_per_group(ws, Config) ->
-    Apps = emqx_cth_suite:start(
-        [{emqx, ?config(emqx_config, Config)}],
-        #{work_dir => emqx_cth_suite:work_dir(Config)}
-    ),
+init_per_group(ws, Config0) ->
+    CTHOpts = ?config(cth_opts, Config0),
+    Config = emqx_common_test_helpers:start_apps_ds(Config0, _ExtraApps = [], CTHOpts),
     [
         {ssl, false},
         {host, "localhost"},
         {enable_websocket, true},
         {port, get_listener_port(ws, default)},
-        {conn_fun, ws_connect},
-        {group_apps, Apps}
+        {conn_fun, ws_connect}
         | Config
     ];
-init_per_group(quic, Config) ->
-    Apps = emqx_cth_suite:start(
-        [
-            {emqx,
-                ?config(emqx_config, Config) ++
-                    "\n listeners.quic.test {"
-                    "\n   enable = true"
-                    "\n   ssl_options.verify = verify_peer"
-                    "\n }"}
-        ],
-        #{work_dir => emqx_cth_suite:work_dir(Config)}
-    ),
+init_per_group(quic, Config0) ->
+    CTHOpts0 = #{emqx_opts := EMQXOpts0} = ?config(cth_opts, Config0),
+    EMQXOpts = EMQXOpts0#{
+        <<"listeners">> => #{
+            <<"quic">> => #{
+                <<"test">> => #{
+                    <<"enable">> => true,
+                    <<"ssl_options">> => #{<<"verify">> => <<"verify_peer">>}
+                }
+            }
+        }
+    },
+    CTHOpts = CTHOpts0#{emqx_opts := EMQXOpts},
+    Config = emqx_common_test_helpers:start_apps_ds(Config0, _ExtraApps = [], CTHOpts),
     [
         {port, get_listener_port(quic, test)},
         {conn_fun, quic_connect},
         {ssl_opts, emqx_common_test_helpers:client_mtls()},
-        {ssl, true},
-        {group_apps, Apps}
+        {ssl, true}
         | Config
     ].
 
@@ -145,7 +170,8 @@ get_listener_port(Type, Name) ->
     end.
 
 end_per_group(Group, Config) when Group == tcp; Group == ws; Group == quic ->
-    ok = emqx_cth_suite:stop(?config(group_apps, Config));
+    emqx_common_test_helpers:stop_apps_ds(Config),
+    ok;
 end_per_group(_, _Config) ->
     catch emqx_ds:drop_db(?PERSISTENT_MESSAGE_DB),
     ok.
@@ -162,6 +188,7 @@ end_per_testcase(TestCase, Config) ->
         true -> ?MODULE:TestCase('end', Config);
         false -> ok
     end,
+    snabbkaffe:stop(),
     Config.
 
 preconfig_per_testcase(TestCase, Config) ->
@@ -741,24 +768,27 @@ t_publish_many_while_client_is_gone_qos1(Config) ->
     %% but it's an easy number to pick.
     NPubs = NPubs1 + NPubs2,
 
-    Msgs2 = receive_messages(NPubs, _Timeout = 2000),
+    Msgs2 = receive_messages(NPubs),
     NMsgs2 = length(Msgs2),
 
     ct:pal("Msgs2 = ~p", [Msgs2]),
 
     ?assert(NMsgs2 < NPubs, {NMsgs2, '<', NPubs}),
     ?assert(NMsgs2 > NPubs2, {NMsgs2, '>', NPubs2}),
-    ?assert(NMsgs2 >= NPubs - NAcked, Msgs2),
-    NSame = NMsgs2 - NPubs2,
+    %% Once reconnected, we should receive all the published messages above (`Msgs1 ++
+    %% Msgs2'), *except* those from `Msgs1' that we acked.
+    ?assert(NMsgs2 == NPubs - NAcked, #{msgs2 => Msgs2, n_pubs => NPubs, n_acked => NAcked}),
+    %% All messages from `Msgs1' that were not acked will be marked with `dup = true'.
+    NDup = NMsgs1 - NAcked,
     ?assert(
-        lists:all(fun(#{dup := Dup}) -> Dup end, lists:sublist(Msgs2, NSame))
+        lists:all(fun(#{dup := Dup}) -> Dup end, lists:sublist(Msgs2, NDup))
     ),
     ?assertNot(
-        lists:all(fun(#{dup := Dup}) -> Dup end, lists:nthtail(NSame, Msgs2))
+        lists:all(fun(#{dup := Dup}) -> Dup end, lists:nthtail(NDup, Msgs2))
     ),
     ?assertEqual(
-        [maps:with([packet_id, topic, payload], M) || M <- lists:nthtail(NMsgs1 - NSame, Msgs1)],
-        [maps:with([packet_id, topic, payload], M) || M <- lists:sublist(Msgs2, NSame)]
+        [maps:with([packet_id, topic, payload], M) || M <- lists:nthtail(NMsgs1 - NDup, Msgs1)],
+        [maps:with([packet_id, topic, payload], M) || M <- lists:sublist(Msgs2, NDup)]
     ),
 
     ok = disconnect_client(Client2).
@@ -880,6 +910,7 @@ t_publish_many_while_client_is_gone(Config) ->
         PubRels1
     ),
 
+    ct:pal("Disconnecting..."),
     ok = disconnect_client(Client1),
     maybe_kill_connection_process(ClientId, Config),
 
@@ -891,6 +922,7 @@ t_publish_many_while_client_is_gone(Config) ->
     ok = publish_many(Pubs2),
     NPubs2 = length(Pubs2),
 
+    ct:pal("Reconnecting..."),
     {ok, Client2} = emqtt:start_link([{clean_start, false} | ClientOpts]),
     {ok, _} = emqtt:ConnFun(Client2),
 
@@ -943,11 +975,13 @@ t_publish_many_while_client_is_gone(Config) ->
     ),
 
     %% Ensure that PUBCOMPs are propagated to the channel.
+    ct:pal("Disconnecting..."),
     pong = emqtt:ping(Client2),
     %% Reconnect for the last time
     ok = disconnect_client(Client2),
     maybe_kill_connection_process(ClientId, Config),
 
+    ct:pal("Reconnecting..."),
     {ok, Client3} = emqtt:start_link([{clean_start, false} | ClientOpts]),
     {ok, _} = emqtt:ConnFun(Client3),
 
@@ -956,7 +990,11 @@ t_publish_many_while_client_is_gone(Config) ->
     ct:pal("Msgs3 = ~p", [Msgs3]),
     ?assertMatch(
         [<<"M10">>, <<"M11">>, <<"M12">>],
-        [I || #{payload := I} <- Msgs3]
+        [
+            I
+         || #{payload := I, client_pid := C3} <- Msgs3,
+            C3 =:= Client3
+        ]
     ),
 
     ok = disconnect_client(Client3).
@@ -1381,7 +1419,9 @@ t_sys_message_delivery(Config) ->
     ?assertMatch(
         [#{topic := SysTopic, qos := 0, retain := false, payload := _Uptime3}],
         receive_messages(1)
-    ).
+    ),
+
+    ok = emqtt:disconnect(Client2).
 
 t_client_replies_pubrec_when_qos1(Config) ->
     Host = "127.0.0.1",

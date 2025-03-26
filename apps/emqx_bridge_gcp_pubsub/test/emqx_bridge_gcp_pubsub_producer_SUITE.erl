@@ -199,9 +199,14 @@ create_bridge(Config, GCPPubSubConfigOverrides) ->
     GCPPubSubConfig0 = ?config(gcp_pubsub_config, Config),
     GCPPubSubConfig = emqx_utils_maps:deep_merge(GCPPubSubConfig0, GCPPubSubConfigOverrides),
     ct:pal("creating bridge: ~p", [GCPPubSubConfig]),
-    Res = emqx_bridge:create(TypeBin, Name, GCPPubSubConfig),
+    Res = emqx_bridge_testlib:create_bridge_api(TypeBin, Name, GCPPubSubConfig),
     ct:pal("bridge creation result: ~p", [Res]),
-    Res.
+    case Res of
+        {error, {Status, Headers, Body0}} ->
+            {error, {Status, Headers, emqx_bridge_testlib:try_decode_error(Body0)}};
+        {ok, {Status, Headers, Body0}} ->
+            {ok, {Status, Headers, emqx_bridge_testlib:try_decode_error(Body0)}}
+    end.
 
 create_bridge_http(Config) ->
     create_bridge_http(Config, _GCPPubSubConfigOverrides = #{}).
@@ -224,7 +229,9 @@ create_bridge_http(Config, GCPPubSubConfigOverrides) ->
     Res =
         case emqx_mgmt_api_test_util:request_api(post, Path, "", AuthHeader, Params, Opts) of
             {ok, {Status, Headhers, Res0}} ->
-                {ok, {Status, Headhers, emqx_utils_json:decode(Res0, [return_maps])}};
+                TypeV1 = emqx_action_info:bridge_v1_type_to_action_type(TypeBin),
+                _ = emqx_bridge_v2_testlib:kickoff_action_health_check(TypeV1, Name),
+                {ok, {Status, Headhers, emqx_utils_json:decode(Res0)}};
             {error, {Status, Headers, Body0}} ->
                 {error, {Status, Headers, emqx_bridge_testlib:try_decode_error(Body0)}};
             Error ->
@@ -251,7 +258,7 @@ create_rule_and_action_http(Config) ->
     Path = emqx_mgmt_api_test_util:api_path(["rules"]),
     AuthHeader = emqx_mgmt_api_test_util:auth_header_(),
     case emqx_mgmt_api_test_util:request_api(post, Path, "", AuthHeader, Params) of
-        {ok, Res} -> {ok, emqx_utils_json:decode(Res, [return_maps])};
+        {ok, Res} -> {ok, emqx_utils_json:decode(Res)};
         Error -> Error
     end.
 
@@ -490,7 +497,7 @@ assert_valid_request_headers(Headers, ServiceAccountJSON) ->
     end.
 
 assert_valid_request_body(Body) ->
-    BodyMap = emqx_utils_json:decode(Body, [return_maps]),
+    BodyMap = emqx_utils_json:decode(Body),
     ?assertMatch(#{<<"messages">> := [_ | _]}, BodyMap),
     ct:pal("request: ~p", [BodyMap]),
     #{<<"messages">> := Messages} = BodyMap,
@@ -499,7 +506,7 @@ assert_valid_request_body(Body) ->
             ?assertMatch(#{<<"data">> := <<_/binary>>}, Msg),
             #{<<"data">> := Content64} = Msg,
             Content = base64:decode(Content64),
-            Decoded = emqx_utils_json:decode(Content, [return_maps]),
+            Decoded = emqx_utils_json:decode(Content),
             ct:pal("decoded payload: ~p", [Decoded]),
             ?assert(is_map(Decoded)),
             Decoded
@@ -527,12 +534,12 @@ receive_http_request(ServiceAccountJSON) ->
         {http, Headers, Body} ->
             ct:pal("received publish:\n  ~p", [#{headers => Headers, body => Body}]),
             assert_valid_request_headers(Headers, ServiceAccountJSON),
-            #{<<"messages">> := Msgs} = emqx_utils_json:decode(Body, [return_maps]),
+            #{<<"messages">> := Msgs} = emqx_utils_json:decode(Body),
             lists:map(
                 fun(Msg) ->
                     #{<<"data">> := Content64} = Msg,
                     Content = base64:decode(Content64),
-                    Decoded = emqx_utils_json:decode(Content, [return_maps]),
+                    Decoded = emqx_utils_json:decode(Content),
                     Msg#{<<"data">> := Decoded}
                 end,
                 Msgs
@@ -932,12 +939,15 @@ test_publish_success_batch(Config) ->
 
 t_not_a_json(Config) ->
     ?assertMatch(
-        {error, #{
-            kind := validation_error,
-            reason := "not a json",
-            %% should be censored as it contains secrets
-            value := <<"******">>
-        }},
+        {error,
+            {_, _, #{
+                <<"message">> := #{
+                    <<"kind">> := <<"validation_error">>,
+                    <<"reason">> := <<"not a json">>,
+                    %% should be censored as it contains secrets
+                    <<"value">> := <<"******">>
+                }
+            }}},
         create_bridge(
             Config,
             #{
@@ -948,20 +958,6 @@ t_not_a_json(Config) ->
     ok.
 
 t_not_of_service_account_type(Config) ->
-    ?assertMatch(
-        {error, #{
-            kind := validation_error,
-            reason := #{wrong_type := <<"not a service account">>},
-            %% should be censored as it contains secrets
-            value := <<"******">>
-        }},
-        create_bridge(
-            Config,
-            #{
-                <<"service_account_json">> => #{<<"type">> => <<"not a service account">>}
-            }
-        )
-    ),
     ?assertMatch(
         {error,
             {{_, 400, _}, _, #{
@@ -983,27 +979,6 @@ t_not_of_service_account_type(Config) ->
 
 t_json_missing_fields(Config) ->
     GCPPubSubConfig0 = ?config(gcp_pubsub_config, Config),
-    ?assertMatch(
-        {error, #{
-            kind := validation_error,
-            reason :=
-                #{
-                    missing_keys := [
-                        <<"client_email">>,
-                        <<"private_key">>,
-                        <<"private_key_id">>,
-                        <<"project_id">>,
-                        <<"type">>
-                    ]
-                },
-            %% should be censored as it contains secrets
-            value := <<"******">>
-        }},
-        create_bridge([
-            {gcp_pubsub_config, GCPPubSubConfig0#{<<"service_account_json">> := #{}}}
-            | Config
-        ])
-    ),
     ?assertMatch(
         {error,
             {{_, 400, _}, _, #{
@@ -1247,10 +1222,11 @@ do_econnrefused_or_timeout_test(Config, Error) ->
             case Error of
                 econnrefused ->
                     case ?of_kind(gcp_pubsub_request_failed, Trace) of
-                        [#{reason := Error, connector := ConnectorResourceId} | _] ->
-                            ok;
-                        [#{reason := {closed, _Msg}, connector := ConnectorResourceId} | _] ->
-                            %% _Msg = "The connection was lost."
+                        [#{reason := Reason, connector := ConnectorResourceId} | _] when
+                            Reason == Error;
+                            Reason == closed;
+                            element(1, Reason) == closed
+                        ->
                             ok;
                         Trace0 ->
                             error(

@@ -187,7 +187,12 @@ parse_connectors_and_check(ConfigString, ConnectorType, Name) ->
     emqx_utils_maps:safe_atom_key_map(Config).
 
 create_bridge(Type, Name, Conf) ->
-    emqx_bridge_v2:create(Type, Name, Conf).
+    emqx_bridge_v2_testlib:create_kind_api([
+        {bridge_kind, action},
+        {action_type, Type},
+        {action_name, Name},
+        {action_config, Conf}
+    ]).
 
 delete_bridge(Type, Name) ->
     emqx_bridge_v2:remove(Type, Name).
@@ -219,7 +224,7 @@ call_create_http(Root, Params) ->
     Path = emqx_mgmt_api_test_util:api_path([Root]),
     AuthHeader = emqx_mgmt_api_test_util:auth_header_(),
     case emqx_mgmt_api_test_util:request_api(post, Path, "", AuthHeader, Params) of
-        {ok, Res} -> {ok, emqx_utils_json:decode(Res, [return_maps])};
+        {ok, Res} -> {ok, emqx_utils_json:decode(Res)};
         Error -> Error
     end.
 

@@ -23,8 +23,6 @@
 -include_lib("emqx/include/emqx_access_control.hrl").
 -include_lib("emqx/include/logger.hrl").
 
--import(proplists, [get_value/2, get_value/3]).
-
 %% API
 -export([
     info/1,
@@ -56,6 +54,8 @@
     handle_recv_nack_frame/2
 ]).
 
+-export_type([channel/0, replies/0, stomp_frame/0]).
+
 -record(channel, {
     %% Context
     ctx :: emqx_gateway_ctx:context(),
@@ -79,7 +79,7 @@
     transaction :: #{binary() => list()}
 }).
 
--type channel() :: #channel{}.
+-opaque channel() :: #channel{}.
 
 -type conn_state() :: idle | connecting | connected | disconnected.
 
@@ -419,7 +419,8 @@ process_connect(
                 {<<"version">>, <<"1.0,1.1,1.2">>},
                 {<<"content-type">>, <<"text/plain">>}
             ],
-            handle_out(connerr, {Headers, undefined, <<"Not Authenticated">>}, Channel)
+            ErrMsg = io_lib:format("Failed to open session: ~ts", [Reason]),
+            handle_out(connerr, {Headers, undefined, failed_to_open_session, ErrMsg}, Channel)
     end.
 
 %%--------------------------------------------------------------------
@@ -462,7 +463,7 @@ handle_in(Packet = ?PACKET(?CMD_CONNECT), Channel) ->
             process_connect(ensure_connected(NChannel));
         {error, ReasonCode, NChannel} ->
             ErrMsg = io_lib:format("Login Failed: ~ts", [ReasonCode]),
-            handle_out(connerr, {[], undefined, ErrMsg}, NChannel)
+            handle_out(connerr, {[], undefined, ReasonCode, ErrMsg}, NChannel)
     end;
 handle_in(
     Frame = ?PACKET(?CMD_SEND, Headers),
@@ -795,9 +796,9 @@ do_subscribe(
     | {shutdown, Reason :: term(), channel()}
     | {shutdown, Reason :: term(), replies(), channel()}.
 
-handle_out(connerr, {Headers, ReceiptId, ErrMsg}, Channel) ->
+handle_out(connerr, {Headers, ReceiptId, ErrCode, ErrMsg}, Channel) ->
     Frame = error_frame(Headers, ReceiptId, ErrMsg),
-    shutdown(ErrMsg, Frame, Channel);
+    shutdown(ErrCode, Frame, Channel);
 handle_out(error, {ReceiptId, ErrMsg}, Channel) ->
     Frame = error_frame(ReceiptId, ErrMsg),
     {ok, {outgoing, Frame}, Channel};
@@ -815,7 +816,7 @@ handle_out(
         {outgoing, connected_frame(Headers)},
         {event, connected}
     ],
-    {ok, Replies, ensure_heartbeart_timer(Channel)};
+    {ok, Replies, ensure_heartbeat_timer(Channel)};
 handle_out(receipt, undefined, Channel) ->
     {ok, Channel};
 handle_out(receipt, ReceiptId, Channel) ->
@@ -1207,9 +1208,9 @@ do_negotiate_version(Ver, _) ->
     {error, <<"Supported protocol versions < ", Ver/binary>>}.
 
 header(Name, Headers) ->
-    get_value(Name, Headers).
+    proplists:get_value(Name, Headers).
 header(Name, Headers, Val) ->
-    get_value(Name, Headers, Val).
+    proplists:get_value(Name, Headers, Val).
 
 connected_frame(Headers) ->
     emqx_stomp_frame:make(<<"CONNECTED">>, Headers).
@@ -1338,7 +1339,7 @@ ensure_clean_trans_timer(Channel = #channel{transaction = Trans}) ->
 reverse_heartbeats({Cx, Cy}) ->
     iolist_to_binary(io_lib:format("~w,~w", [Cy, Cx])).
 
-ensure_heartbeart_timer(Channel = #channel{clientinfo = ClientInfo}) ->
+ensure_heartbeat_timer(Channel = #channel{clientinfo = ClientInfo}) ->
     Heartbeat = maps:get(heartbeat, ClientInfo),
     ensure_timer(
         [incoming_timer, outgoing_timer],

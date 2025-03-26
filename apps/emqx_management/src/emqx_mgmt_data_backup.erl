@@ -41,6 +41,11 @@
 
 -export([default_validate_mnesia_backup/1]).
 
+-export([
+    validate_export_root_keys/1,
+    parse_export_request/1
+]).
+
 -export_type([import_res/0]).
 
 -ifdef(TEST).
@@ -48,7 +53,10 @@
 -compile(nowarn_export_all).
 -endif.
 
--elvis([{elvis_style, invalid_dynamic_call, disable}]).
+-elvis([
+    {elvis_style, invalid_dynamic_call, disable},
+    {elvis_style, no_catch_expressions, disable}
+]).
 
 -include_lib("kernel/include/file.hrl").
 -include_lib("emqx/include/logger.hrl").
@@ -197,6 +205,45 @@ build_all_table_set_names() ->
             Mods
         )
     ).
+
+validate_export_root_keys(Params) ->
+    RootKeys0 = maps:get(<<"root_keys">>, Params, []),
+    RootKeys = lists:usort(RootKeys0),
+    RootNames = emqx_config:get_root_names(),
+    UnknownKeys = RootKeys -- RootNames,
+    case UnknownKeys of
+        [] ->
+            ok;
+        [_ | _] ->
+            {error, {unknown_root_keys, UnknownKeys}}
+    end.
+
+parse_export_request(Params) ->
+    OutDir = maps:get(<<"out_dir">>, Params, undefined),
+    Opts0 = emqx_utils_maps:put_if(#{}, out_dir, OutDir, OutDir /= undefined),
+    Opts1 =
+        maybe
+            {ok, Keys0} ?= maps:find(<<"root_keys">>, Params),
+            Keys = lists:usort(Keys0),
+            Transform = fun(RawConf) ->
+                maps:with(Keys, RawConf)
+            end,
+            Opts0#{raw_conf_transform => Transform}
+        else
+            error -> Opts0
+        end,
+    maybe
+        {ok, TableSetNames0} ?= maps:find(<<"table_sets">>, Params),
+        TableSetNames = lists:usort(TableSetNames0),
+        {ok, Filter} ?= emqx_mgmt_data_backup:compile_mnesia_table_filter(TableSetNames),
+        {ok, Opts1#{mnesia_table_filter => Filter}}
+    else
+        error ->
+            {ok, Opts1};
+        {error, InvalidSetNames0} ->
+            InvalidSetNames = lists:sort(InvalidSetNames0),
+            {error, {bad_table_sets, InvalidSetNames}}
+    end.
 
 -spec import(file:filename_all()) -> import_res().
 import(BackupFileName) ->
@@ -400,7 +447,8 @@ prepare_new_backup(Opts) ->
             [Y, M, D, HH, MM, SS, Ts rem 1000]
         )
     ),
-    BackupName = ?backup_path(BackupBaseName),
+    BackupDir = maps:get(out_dir, Opts, root_backup_dir()),
+    BackupName = filename:join(BackupDir, BackupBaseName),
     BackupTarName = ?tar(BackupName),
     maybe_print("Exporting data to ~p...~n", [BackupTarName], Opts),
     {ok, TarDescriptor} = ?fmt_tar_err(erl_tar:open(BackupTarName, [write, compressed])),
